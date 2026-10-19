@@ -1,0 +1,16 @@
+node_modules/
+.expo/
+dist/
+# prebuild で生成する(コミットしない)
+/android/
+/ios/
+# ネイティブのビルド生成物
+modules/*/android/build/
+modules/*/android/.cxx/
+.cxx/
+.gradle/
+*.apk
+*.aab
+*.keystore
+.env*
+local.properties

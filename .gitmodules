@@ -1,0 +1,3 @@
+[submodule "modules/vpn-tunnel/android/src/main/jni/hev"]
+	path = modules/vpn-tunnel/android/src/main/jni/hev
+	url = https://github.com/heiher/hev-socks5-tunnel
