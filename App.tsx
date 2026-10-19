@@ -5,7 +5,11 @@ import { Button, PermissionsAndroid, Platform, ScrollView, StyleSheet, Text, Vie
 import Hotspot from './modules/hotspot';
 import KeepAlive from './modules/keep-alive';
 import VpnTunnel from './modules/vpn-tunnel';
-import { DEV_ID, DEV_SECRET, nearbyApi } from './src/devLink';
+import { nearbyApi } from './src/nearbyApi';
+import { Confirm, Found, PairingSession } from './src/pairing/pairing';
+import { secureKv } from './src/pairing/secureKv';
+import { getIdentity, PairStore } from './src/pairing/store';
+import { Identity, Pair } from './src/pairing/types';
 import { createLink } from './src/link/session';
 import { LinkSupervisor } from './src/link/supervisor';
 
@@ -23,6 +27,10 @@ const hhmmss = () => new Date().toTimeString().slice(0, 8);
 let startingLink = false;
 let activeLink: LinkSupervisor | null = null;
 let activeTicker: ReturnType<typeof setInterval> | null = null;
+let activePairing: PairingSession | null = null;
+
+const randomHex = (bytes: number) => Array.from(Crypto.getRandomBytes(bytes), (b) => b.toString(16).padStart(2, '0')).join('');
+const pairStore = new PairStore(secureKv);
 
 export default function App() {
   // --- 端末間リンク(実機テスト) ---
@@ -30,6 +38,19 @@ export default function App() {
   const [state, setState] = useState('停止');
   // 親機 = セルラー回線がある端末(子機にもなれる)。子機 = 回線がない端末
   const [cellular, setCellular] = useState(false);
+  // --- ペアリング ---
+  const [identity, setIdentity] = useState<Identity | null>(null);
+  const [pairs, setPairs] = useState<Pair[]>([]);
+  const pairRef = useRef<Pair | null>(null);
+  pairRef.current = pairs[0] ?? null; // いまは最後に保存したペアを使う(複数ペアの選択は今後)
+  const [pairing, setPairing] = useState<{ devices: Found[]; confirm: Confirm | null; message: string } | null>(null);
+  const reloadPairs = async () => setPairs((await pairStore.list()).sort((a, b) => b.createdAt - a.createdAt));
+  useEffect(() => {
+    void (async () => {
+      setIdentity(await getIdentity(secureKv, randomHex));
+      await reloadPairs();
+    })();
+  }, []);
   useEffect(() => { try { setCellular(Hotspot.hasCellular()); } catch {} }, []);
   const [log, setLog] = useState<string[]>([]);
   const shareMsg = useRef<Record<string, unknown> | null>(null);
@@ -62,6 +83,36 @@ export default function App() {
     setRole(null);
   };
 
+  const stopPairing = () => {
+    activePairing?.stop(); activePairing = null;
+    setPairing(null);
+  };
+  // 近くの端末を探して、確認コードを照合してペアにする(リンクと Nearby を同時には使えないので、リンクは止める)
+  const startPairing = async () => {
+    if (!identity || Platform.OS !== 'android') return;
+    stopLink();
+    stopPairing();
+    await PermissionsAndroid.requestMultiple(PERMS);
+    KeepAlive.start();
+    const s = new PairingSession(nearbyApi, { self: identity, store: pairStore, randomHex, timeoutMs: 120_000 });
+    s.onDevices = (devices) => setPairing((p) => p && { ...p, devices });
+    s.onConfirm = (confirm) => setPairing((p) => p && { ...p, confirm, message: '' });
+    s.onDone = (r) => {
+      activePairing = null;
+      if (r.ok) {
+        push(`ペアリング完了: ${r.pair.peerName}`);
+        void reloadPairs();
+        setPairing(null);
+      } else {
+        push('ペアリング失敗: ' + r.error);
+        setPairing({ devices: [], confirm: null, message: r.error });
+      }
+    };
+    activePairing = s;
+    setPairing({ devices: [], confirm: null, message: '近くの端末を探しています…相手の端末でも「ペアを追加」を開いてください' });
+    s.start();
+  };
+
   const startLink = async (r: 'host' | 'guest') => {
     if (Platform.OS !== 'android') return;
     // 権限ダイアログの await 中に二重で押されても、リンクが2本走らないよう、同期的に弾く
@@ -73,14 +124,15 @@ export default function App() {
     activeLink?.stop();
     if (activeTicker) clearInterval(activeTicker);
     activeLink = null; activeTicker = null;
-    if (!DEV_SECRET) { push('EXPO_PUBLIC_DEV_SECRET が未設定です(README 参照)'); return; }
+    const pair = pairRef.current;
+    if (!pair || !identity) { push('先に「ペアを追加」で相手の端末とペアリングしてください'); return; }
+    stopPairing();
     const res = await PermissionsAndroid.requestMultiple(PERMS);
     push('権限: ' + Object.entries(res).map(([k, v]) => `${k.split('.').pop()}=${v === 'granted' ? 'OK' : v}`).join(' '));
     KeepAlive.start();
-    const peer = r === 'host' ? DEV_ID.guest : DEV_ID.host;
     const sup = createLink(
       nearbyApi,
-      { role: r, selfId: DEV_ID[r], pair: { peerId: peer, secret: DEV_SECRET }, connectTimeoutMs: 30000 },
+      { role: r, selfId: identity.id, pair: { peerId: pair.peerId, secret: pair.secret }, connectTimeoutMs: 30000 },
       (body) => {
         if ((body as any)?.kind === 'wifi' && r === 'guest') {
           void joinFromHost(body as any);
@@ -153,9 +205,11 @@ export default function App() {
       }
       if (!cred) return;
     } else {
-      // 実験: SSID・パスフレーズ・チャンネル(2.4GHz ch6)を毎回同じにする。共有コードから導く(開発用の固定コード)
-      const h1 = nearbyApi.hmac(DEV_SECRET, 'direct-ssid');
-      const h2 = nearbyApi.hmac(DEV_SECRET, 'direct-pass');
+      // SSID・パスフレーズ・チャンネル(2.4GHz ch6)を毎回同じにする(承認の記憶が効く)。ペアの共有コードから導く
+      const secret = pairRef.current?.secret;
+      if (!secret) { push('ペアがありません'); return; }
+      const h1 = nearbyApi.hmac(secret, 'direct-ssid');
+      const h2 = nearbyApi.hmac(secret, 'direct-pass');
       const name = 'DIRECT-dh-' + h1.slice(0, 4);
       const pass = h2.slice(0, 12);
       const t0 = Date.now();
@@ -219,8 +273,40 @@ export default function App() {
       <Text style={styles.h}>Tether Auto Connect</Text>
 
       <Text style={styles.sec}>端末間リンク(開発版)</Text>
+      <Text>この端末: {identity ? `${identity.name}(${identity.id})` : '…'}</Text>
+      <Text>ペア: {pairs.length ? pairs.map((p) => p.peerName).join(', ') : 'なし'}</Text>
+      {pairing ? (
+        <View style={styles.log}>
+          {pairing.confirm ? (
+            <>
+              <Text style={{ fontSize: 16 }}>相手: {pairing.confirm.peerName}</Text>
+              <Text style={{ fontSize: 40, fontWeight: '700', letterSpacing: 6 }}>{pairing.confirm.digits}</Text>
+              <Text>相手の画面にも同じ数字が出ていることを確認してください</Text>
+              <Button title="一致する" onPress={() => pairing.confirm!.accept()} />
+              <Button title="一致しない" onPress={() => pairing.confirm!.reject()} />
+            </>
+          ) : (
+            <>
+              <Text>{pairing.message}</Text>
+              {pairing.devices.map((d) => (
+                <Button key={d.endpointId} title={`${d.label} とペアにする`} onPress={() => activePairing?.connectTo(d.endpointId)} />
+              ))}
+            </>
+          )}
+          <Button title="ペアリングをやめる" onPress={stopPairing} />
+        </View>
+      ) : (
+        !role && (
+          <>
+            <Button title="ペアを追加(近くの端末を探す)" onPress={startPairing} />
+            {pairs.map((p) => (
+              <Button key={p.peerId} title={`削除: ${p.peerName}`} color="#b00020" onPress={() => pairStore.remove(p.peerId).then(reloadPairs)} />
+            ))}
+          </>
+        )
+      )}
       <Text>状態: {state}{role ? ` / ${role === 'host' ? '親機' : '子機'}` : ''}</Text>
-      {!role ? (
+      {pairing ? null : !role ? (
         <>
           <Text>セルラー回線: {cellular ? 'あり → 親機になります' : 'なし → 子機になります'}</Text>
           <Button title={`開始(自動: ${cellular ? '親機' : '子機'})`} onPress={() => startLink(cellular ? 'host' : 'guest')} />

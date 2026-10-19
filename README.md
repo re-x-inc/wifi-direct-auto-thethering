@@ -4,7 +4,7 @@
 仕様は [docs/SPEC.md](docs/SPEC.md) を参照。
 
 ## 状態
-開発版。共有コードは開発用に環境変数で渡す方式で、**本番のペアリングは未実装**のため配布しない。
+開発版。ペアリング(近くの端末を探す → 確認コードの照合 → ペアごとのランダムな共有コードを交換)は実装済み。バックグラウンド維持・機種違いの検証が未了のため配布しない。
 
 ## 開発
 hev-socks5-tunnel(MIT)は git サブモジュールです。クローン時は `--recursive` を付けます。
@@ -14,7 +14,6 @@ git clone --recursive git@github.com:re-x-inc/wifi-direct-auto-thethering.git
 npm install
 npx expo prebuild --platform android --no-install
 cd android && ANDROID_HOME=/opt/android-sdk ./gradlew :app:assembleDebug
-# 開発用の共有コードはコードに書かず、起動時に渡す(両端末で同じ値になる)
-EXPO_PUBLIC_DEV_SECRET=$(openssl rand -hex 16) npx expo start --port 8081   # 監視モード。adb reverse tcp:8081 tcp:8081 を忘れずに
+npx expo start --port 8081        # 監視モード。adb reverse tcp:8081 tcp:8081 を忘れずに
 npm test                          # src/link のテスト
 ```
