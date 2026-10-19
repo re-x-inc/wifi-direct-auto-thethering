@@ -18,6 +18,8 @@ declare class HotspotModule extends NativeModule<Events> {
   stopEcho(): void;
   joinWifi(ssid: string, pass: string): Promise<{ gateway: string; reused?: boolean }>;
   leaveWifi(): void;
+  /** セルラー回線(INTERNET 能力つき)があるか */
+  hasCellular(): boolean;
   suggestWifi(ssid: string, pass: string): Promise<{ gateway: string; reused?: boolean }>;
   bindToJoined(): boolean;
   unbindProcess(): void;

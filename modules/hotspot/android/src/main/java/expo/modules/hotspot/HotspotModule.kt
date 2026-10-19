@@ -237,6 +237,16 @@ class HotspotModule : Module() {
     }
     Function("leaveWifi") { leave() }
 
+    /** セルラー回線(INTERNET 能力つき)があるか。役割(親機/子機)の自動判定に使う。 */
+    Function("hasCellular") {
+      @Suppress("DEPRECATION")
+      cm.allNetworks.any { n ->
+        val c = cm.getNetworkCapabilities(n)
+        c != null && c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
+          c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+      }
+    }
+
     /**
      * WifiNetworkSuggestion で参加する。初回に一度だけ「ネットワークの提案を許可」を承認すれば、
      * 以降は承認ダイアログなしで OS が自動接続する(WifiNetworkSpecifier は毎回承認が必要)。

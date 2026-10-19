@@ -28,6 +28,9 @@ export default function App() {
   // --- 端末間リンク(実機テスト) ---
   const [role, setRole] = useState<'host' | 'guest' | null>(null);
   const [state, setState] = useState('停止');
+  // 親機 = セルラー回線がある端末(子機にもなれる)。子機 = 回線がない端末
+  const [cellular, setCellular] = useState(false);
+  useEffect(() => { try { setCellular(Hotspot.hasCellular()); } catch {} }, []);
   const [log, setLog] = useState<string[]>([]);
   const shareMsg = useRef<Record<string, unknown> | null>(null);
   const link = useRef<LinkSupervisor | null>(null);
@@ -219,8 +222,10 @@ export default function App() {
       <Text>状態: {state}{role ? ` / ${role === 'host' ? '親機' : '子機'}` : ''}</Text>
       {!role ? (
         <>
-          <Button title="親機として開始" onPress={() => startLink('host')} />
-          <Button title="子機として開始" onPress={() => startLink('guest')} />
+          <Text>セルラー回線: {cellular ? 'あり → 親機になります' : 'なし → 子機になります'}</Text>
+          <Button title={`開始(自動: ${cellular ? '親機' : '子機'})`} onPress={() => startLink(cellular ? 'host' : 'guest')} />
+          {cellular && <Button title="子機として使う(別の親機の回線を借りる)" onPress={() => startLink('guest')} />}
+          <Button title="回線の有無を再判定" onPress={() => setCellular(Hotspot.hasCellular())} />
         </>
       ) : (
         <>
