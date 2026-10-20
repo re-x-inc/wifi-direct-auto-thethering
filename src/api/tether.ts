@@ -2,6 +2,7 @@ import { createLink } from '../link/session';
 import { directCreds, removeDirectCreds } from '../pairing/directCreds';
 import type { LinkSupervisor } from '../link/supervisor';
 import { Confirm, Found, PairingResult, PairingSession } from '../pairing/pairing';
+import { clearDirectCreds } from '../pairing/forget';
 import { getIdentity, PairStore } from '../pairing/store';
 import type { Identity, Pair } from '../pairing/types';
 import {
@@ -32,6 +33,8 @@ type Wire =
   | { kind: 'tether.wifi'; method: 'WifiDirect' | 'LocalOnlyHotspot'; ssid: string; pass: string; port: number; socks: Socks }
   | { kind: 'tether.wifi-result'; ok: boolean; gateway?: string; rttMs?: number; error?: string }
   | { kind: 'tether.need-wifi' }
+  // 子機が自分でペア解除するときの通知(best-effort)。親機は該当ペアを消す
+  | { kind: 'tether.unpair' }
   // 能力の交換と方式判断(docs/SPEC.md §9)。機種名と能力・判断だけを流す
   | { kind: 'tether.hello'; v: number; rev: string }
   | { kind: 'tether.caps-req'; v: number }
@@ -246,6 +249,26 @@ export class Tether {
     return (await this.store.list()).sort((a, b) => b.createdAt - a.createdAt);
   }
 
+  /**
+   * 子機が自分でペア解除する。親機と接続中なら解除通知(tether.unpair)を best-effort で送ってから、removePair する。
+   * 未接続・送れない場合は通知なしで、この端末のペアだけ消す。
+   */
+  async unpair(peerId: string): Promise<void> {
+    if (this.peerId === peerId && this.state.role === 'guest' && this.state.link === 'connected' && this.link) {
+      try {
+        this.link.send({ kind: 'tether.unpair' } satisfies Wire, { ttlMs: 0 });
+        await this.p.sleep(300); // 送信が流れる猶予(stop で切る前に)
+      } catch {}
+    }
+    await this.forgetPair(peerId);
+  }
+
+  /** removePair + direct.v1.<peerId> の削除(#8 の removePair が同じ削除を持つ場合も無害) */
+  private async forgetPair(peerId: string): Promise<void> {
+    await this.removePair(peerId);
+    await clearDirectCreds(this.p.kv, peerId).catch(() => {});
+  }
+
   async removePair(peerId: string): Promise<void> {
     await this.store.remove(peerId);
     await removePeerData(this.p.kv, peerId).catch(() => {});
@@ -290,6 +313,14 @@ export class Tether {
       store: this.store,
       randomHex: this.p.randomHex,
       now: this.p.now,
+      onReplaced: async (old) => {
+        for (const o of old) {
+          await clearDirectCreds(this.p.kv, o.peerId).catch(() => {});
+          await removePeerData(this.p.kv, o.peerId).catch(() => {});
+          if (resume?.peerId === o.peerId) resume.peerId = undefined;
+        }
+        this.log(`同じ名前の旧ペアを置き換えました(${old.length}件)`);
+      },
       timeoutMs: this.cfg.pairingTimeoutMs ?? 120_000,
       role,
     });
@@ -393,6 +424,7 @@ export class Tether {
         this.offWifiLost = this.p.hotspot.onWifiLost(() => this.onWifiLost(gen));
         this.offJoinPrompt = this.p.hotspot.onJoinPrompt?.((e) => {
           if (gen !== this.gen) return;
+          // 'show' だけが案内を出す。ok / declined / timeout / cancelled はどれも「終わり」なので案内を必ず消す
           this.set({ joinPrompt: e.phase === 'show' });
           this.log(`Wi-Fi 許可画面: ${e.phase}`);
         }) ?? null;
@@ -779,7 +811,17 @@ export class Tether {
 
   // ---------- 受信・接続イベント ----------
 
+  /** 最終接続時刻を更新する(1 分に 1 回まで書く) */
+  private lastTouch = 0;
+  private touchPeer(peerId: string, force = false): void {
+    const t = this.p.now();
+    if (!force && t - this.lastTouch < 60_000) return;
+    this.lastTouch = t;
+    void this.store.touch(peerId, t).catch(() => {});
+  }
+
   private onConnected(role: TetherRole, gen: number): void {
+    if (this.peerId) this.touchPeer(this.peerId, true);
     // 親機: つながり直したら、判断と共有中の接続情報を再送する(Direct は作り直さず、子機は同じ SSID を再利用する)
     if (role === 'host') {
       this.sendPlan();
@@ -793,11 +835,16 @@ export class Tether {
   private onWire(gen: number, role: TetherRole, peerId: string, body: unknown): void {
     if (gen !== this.gen) return;
     if (!isWire(body)) return; // 知らない形式は捨てる
+    this.touchPeer(peerId);
     switch (body.kind) {
       case 'tether.app':
         for (const cb of [...this.msgSubs]) {
           try { cb(body.body, { role, peerId }); } catch (e: any) { this.log('onMessage で例外: ' + (e?.message ?? e)); }
         }
+        break;
+      case 'tether.unpair':
+        // 子機が解除した: 親機は該当ペアと direct.v1.<peerId> を消す
+        if (role === 'host') void this.forgetPair(peerId).catch((e) => this.log('unpair 処理で例外: ' + (e?.message ?? e)));
         break;
       case 'tether.wifi':
         if (role === 'guest') void this.join(gen, body, false);
@@ -885,6 +932,8 @@ export class Tether {
       this.link?.send({ kind: 'tether.wifi-result', ok: false, error: msg } satisfies Wire, { key: 'wifi-result', ttlMs: WIFI_TTL_MS });
     } finally {
       this.joining = false;
+      // 取りこぼしの保険: 参加の処理が終わったら許可画面の案内は出さない
+      if (gen === this.gen && this.state.joinPrompt) this.set({ joinPrompt: false });
     }
   }
 

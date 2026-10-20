@@ -42,6 +42,7 @@ const plan = planLink({
 - `tether.onHandshake(cb)`: `{ type: 'caps-received', peerId, cached, model }` / `{ type: 'plan', side: 'host' | 'guest', plan }` / `{ type: 'update-required', who: 'host' | 'guest' }`。
 - `TetherState.plan`: 直近の判断(親機が決め、子機へ通知されたもの)。`plan.ok === false` のとき `plan.failure.message` が `TetherState.error` にも入る。
 - `TetherConfig.capsWaitMs`: 親機が子機の能力を待つ最長時間(既定 5000)。キャッシュがあれば待たない。
+- `TetherState.joinPrompt` / native `onJoinPrompt({ ssid, phase, timeoutMs? })`(子機の Wi-Fi 許可画面): `show` = 画面が出た(timeoutMs 以内に「接続」を押してもらう)。終わりは必ず次のどれか 1 つが来る: `ok`(参加できた)/ `declined`(拒否、または OS が見つからないと返した)/ `timeout`(timeoutMs 経っても見つからず・承認されず、要求を取り下げた)/ `cancelled`(leaveWifi・別 SSID への参加・stop で取り下げた)。`show` 以外では `joinPrompt` は false。待ち手が居なくても timeout/cancelled は送る。
 - 端末間メッセージ(内部): `tether.hello` / `tether.caps-req` / `tether.caps` / `tether.plan`。内容は機種名・能力・判断のみ。
 - ペアを解除すると、そのペアの能力キャッシュと履歴も消える。
 
