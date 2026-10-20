@@ -8,7 +8,7 @@ import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
 
-/** 全通信を親機の SOCKS5 へ流す VPN。DNS は mapdns でドメイン名つきの CONNECT に変換する(UDP 中継を要しない)。 */
+/** 全通信を親機の SOCKS5 へ流す VPN。DNS は mapdns でドメイン名つきの CONNECT に変換し、それ以外の UDP(QUIC・通話など)は SOCKS5 の UDP ASSOCIATE で中継する。 */
 class TunnelService : VpnService() {
   private var tun: ParcelFileDescriptor? = null
   @Volatile private var watchdog: Thread? = null
@@ -49,7 +49,7 @@ class TunnelService : VpnService() {
         socks5:
           port: $port
           address: $host
-          udp: 'tcp'
+          udp: 'udp'
           username: '$user'
           password: '$pass'
         mapdns:

@@ -25,15 +25,15 @@ async function setup() {
   const kvA = mem(), kvB = mem();
   const idA = await getIdentity(kvA, randomHex), idB = await getIdentity(kvB, randomHex);
   const storeA = new PairStore(kvA), storeB = new PairStore(kvB);
-  const mk = (api: any, self: any, store: PairStore) => {
-    const s = new PairingSession(api, { self, store, randomHex });
+  const mk = (api: any, self: any, store: PairStore, role: 'host' | 'guest') => {
+    const s = new PairingSession(api, { self, store, randomHex, role });
     const st = { devices: [] as Found[], confirm: null as Confirm | null, result: null as PairingResult | null };
     s.onDevices = (l) => (st.devices = l);
     s.onConfirm = (c) => (st.confirm = c);
     s.onDone = (r) => (st.result = r);
     return { s, st };
   };
-  return { A: mk(net.a, idA, storeA), B: mk(net.b, idB, storeB), idA, idB, storeA, storeB };
+  return { A: mk(net.a, idA, storeA, 'guest'), B: mk(net.b, idB, storeB, 'host'), idA, idB, storeA, storeB };
 }
 
 test('端末IDは一度だけ作り、再起動しても同じ', async () => {
@@ -69,6 +69,8 @@ test('確認コードを両方が承認すると、同じ共有コードが両�
   assert.equal(pa.peerId, idB.id);
   assert.equal(pb.peerId, idA.id);
   assert.equal(pa.secret, pb.secret);
+  assert.equal(pa.role, 'guest'); // 子機になる側
+  assert.equal(pb.role, 'host'); // 親機になる側
   assert.match(pa.secret, /^[0-9a-f]{64}$/);
 });
 
@@ -97,4 +99,39 @@ test('同じ相手と再ペアリングすると、共有コードが入れ替�
   assert.equal(l[0].secret, 'new');
   await store.remove('Tx');
   assert.deepEqual(await store.list(), []);
+});
+
+test('進行状況: 要求中 → 相手の承認待ち → 共有コードの交換が通知される', async () => {
+  const { A, B } = await setup();
+  const a: string[] = [], b: string[] = [];
+  A.s.onStatus = (m) => a.push(m);
+  B.s.onStatus = (m) => b.push(m);
+  A.s.start(); B.s.start();
+  await until(() => A.st.devices.length === 1);
+  A.s.connectTo(A.st.devices[0].endpointId);
+  await until(() => !!A.st.confirm && !!B.st.confirm);
+  assert.match(a[0], /要求/);
+  A.st.confirm!.accept(); // 先に A だけが承認 → A は相手の承認待ち
+  assert.match(a[a.length - 1], /承認を待って/);
+  B.st.confirm!.accept();
+  await until(() => !!A.st.result && !!B.st.result);
+  assert.ok(a.some((m) => /交換/.test(m)));
+  assert.ok(b.some((m) => /交換/.test(m)));
+});
+
+test('親機同士・子機同士では見つからない(親機は広告だけ、子機は探索だけ)', async () => {
+  const net = fakePairNet();
+  const kv1 = mem(), kv2 = mem();
+  const mkS = async (api: any, kv: any, role: 'host' | 'guest') => {
+    const s = new PairingSession(api, { self: await getIdentity(kv, randomHex), store: new PairStore(kv), randomHex, role });
+    const st = { devices: [] as Found[] };
+    s.onDevices = (l) => (st.devices = l);
+    return { s, st };
+  };
+  const h1 = await mkS(net.a, kv1, 'host'), h2 = await mkS(net.b, kv2, 'host');
+  h1.s.start(); h2.s.start();
+  await wait(50);
+  assert.equal(h1.st.devices.length, 0);
+  assert.equal(h2.st.devices.length, 0);
+  h1.s.stop(); h2.s.stop();
 });

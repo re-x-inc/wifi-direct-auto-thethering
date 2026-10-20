@@ -1,339 +1,303 @@
-import * as Crypto from 'expo-crypto';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
-import { Button, PermissionsAndroid, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
-import Hotspot from './modules/hotspot';
-import KeepAlive from './modules/keep-alive';
-import VpnTunnel from './modules/vpn-tunnel';
-import { nearbyApi } from './src/nearbyApi';
-import { directCreds } from './src/pairing/directCreds';
-import { Confirm, Found, PairingSession } from './src/pairing/pairing';
-import { secureKv } from './src/pairing/secureKv';
-import { getIdentity, PairStore } from './src/pairing/store';
-import { Identity, Pair } from './src/pairing/types';
-import { createLink } from './src/link/session';
-import { LinkSupervisor } from './src/link/supervisor';
-
-const PERMS = [
-  'android.permission.BLUETOOTH_SCAN',
-  'android.permission.BLUETOOTH_ADVERTISE',
-  'android.permission.BLUETOOTH_CONNECT',
-  'android.permission.NEARBY_WIFI_DEVICES',
-  'android.permission.POST_NOTIFICATIONS',
-] as any[];
+import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, type ScrollViewInstance, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Confirm, Found, getTether, Identity, Pair, TetherState } from './src/api';
+import { DiagnosticsPanel } from './src/DiagnosticsPanel';
 
 const hhmmss = () => new Date().toTimeString().slice(0, 8);
 
-// Fast Refresh で App が作り直されても、古いリンクが残って二重に動かないよう、モジュール単位で1本だけ持つ
-let startingLink = false;
-let activeLink: LinkSupervisor | null = null;
-let activeTicker: ReturnType<typeof setInterval> | null = null;
-let activePairing: PairingSession | null = null;
+const LINK_TEXT = { stopped: '停止', connecting: '接続中', waiting: '再試行待ち', connected: '接続済み' } as const;
+const SHARE_TEXT = { off: '—', starting: '準備中', on: '共有中', failed: '失敗' } as const;
+const VPN_TEXT = { off: '—', 'awaiting-permission': '許可待ち', starting: '起動中', on: '通信中', failed: '失敗', held: '停止中(非常口)' } as const;
 
-const randomHex = (bytes: number) => Array.from(Crypto.getRandomBytes(bytes), (b) => b.toString(16).padStart(2, '0')).join('');
-const pairStore = new PairStore(secureKv);
+type PairingUi = { role: 'host' | 'guest'; devices: Found[]; confirm: Confirm | null; message: string; waiting: boolean };
 
+/** 公開 API(src/api)だけで作った、最小の操作画面。ペアを作れば あとは自動で接続・共有・復旧する。 */
 export default function App() {
-  // --- 端末間リンク(実機テスト) ---
-  const [role, setRole] = useState<'host' | 'guest' | null>(null);
-  const [state, setState] = useState('停止');
-  // 親機 = セルラー回線がある端末(子機にもなれる)。子機 = 回線がない端末
-  const [cellular, setCellular] = useState(false);
-  // --- ペアリング ---
+  const tether = getTether();
+  const [s, setS] = useState<TetherState>(tether.getState());
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [pairs, setPairs] = useState<Pair[]>([]);
-  const pairRef = useRef<Pair | null>(null);
-  pairRef.current = pairs[0] ?? null; // いまは最後に保存したペアを使う(複数ペアの選択は今後)
-  const [pairing, setPairing] = useState<{ devices: Found[]; confirm: Confirm | null; message: string } | null>(null);
-  const reloadPairs = async () => setPairs((await pairStore.list()).sort((a, b) => b.createdAt - a.createdAt));
-  useEffect(() => {
-    void (async () => {
-      setIdentity(await getIdentity(secureKv, randomHex));
-      await reloadPairs();
-    })();
-  }, []);
-  useEffect(() => { try { setCellular(Hotspot.hasCellular()); } catch {} }, []);
+  // undefined = 読み込み中 / null = 未選択(初回の選択画面を出す)
+  const [introDone, setIntroDone] = useState(false);
+  const [deviceRole, setDeviceRole] = useState<'host' | 'guest' | null | undefined>(undefined);
+  const [pairing, setPairing] = useState<PairingUi | null>(null);
   const [log, setLog] = useState<string[]>([]);
-  const shareMsg = useRef<Record<string, unknown> | null>(null);
-  const link = useRef<LinkSupervisor | null>(null);
-  const ticker = useRef<ReturnType<typeof setInterval> | null>(null);
-  const push = (s: string) => {
-    console.log('[DH] ' + s);
-    setLog((l) => [`${hhmmss()} ${s}`, ...l].slice(0, 60));
-  };
+  const ctl = useRef<{ connectTo(id: string): void; cancel(): void } | null>(null);
 
-  // 子機: 起動時に残った VPN を止め、Wi-Fi Direct が切れたら VPN とプロセスの固定を外す(全通信を飲み込んだままにしない)
+  const reload = async () => setPairs(await tether.pairs());
+  const run = (p: Promise<unknown>) => p.catch((e) => setLog((l) => [`${hhmmss()} ${e?.message ?? e}`, ...l].slice(0, 60)));
+
   useEffect(() => {
-    try { VpnTunnel.stop(); Hotspot.unbindProcess(); } catch {}
-    const sub = Hotspot.addListener('onWifiLost', () => {
-      try { VpnTunnel.stop(); Hotspot.unbindProcess(); } catch {}
-      push('Wi-Fi Direct 切断 → VPN を停止');
-    });
-    return () => sub.remove();
+    const off1 = tether.subscribe(setS);
+    const off2 = tether.onLog((line) => setLog((l) => [`${hhmmss()} ${line}`, ...l].slice(0, 60)));
+    void (async () => {
+      setIdentity(await tether.identity());
+      setDeviceRole(await tether.deviceRole());
+      await reload();
+      // ペアがあれば、起動しただけで接続を始める(人手を減らす)
+      if ((await tether.pairs()).length && !tether.getState().started) await run(tether.start());
+    })();
+    return () => { off1(); off2(); };
   }, []);
 
-  const stopLink = () => {
-    activeLink?.stop(); activeLink = null;
-    if (activeTicker) clearInterval(activeTicker);
-    activeTicker = null;
-    if (ticker.current) clearInterval(ticker.current);
-    ticker.current = null;
-    link.current?.stop();
-    link.current = null;
-    KeepAlive.stop();
-    setRole(null);
-  };
-
-  const stopPairing = () => {
-    activePairing?.stop(); activePairing = null;
-    setPairing(null);
-  };
-  // 近くの端末を探して、確認コードを照合してペアにする(リンクと Nearby を同時には使えないので、リンクは止める)
-  const startPairing = async () => {
-    if (!identity || Platform.OS !== 'android') return;
-    stopLink();
-    stopPairing();
-    await PermissionsAndroid.requestMultiple(PERMS);
-    KeepAlive.start();
-    const s = new PairingSession(nearbyApi, { self: identity, store: pairStore, randomHex, timeoutMs: 120_000 });
-    s.onDevices = (devices) => setPairing((p) => p && { ...p, devices });
-    s.onConfirm = (confirm) => setPairing((p) => p && { ...p, confirm, message: '' });
-    s.onDone = (r) => {
-      activePairing = null;
-      if (r.ok) {
-        push(`ペアリング完了: ${r.pair.peerName}`);
-        void reloadPairs();
+  const addPair = async (role: 'host' | 'guest') => {
+    setPairing({ role, devices: [], confirm: null, message: '', waiting: false });
+    ctl.current = await tether.beginPairing(role, {
+      onDevices: (devices) => setPairing((p) => p && { ...p, devices }),
+      onConfirm: (confirm) => setPairing((p) => p && { ...p, confirm, message: '', waiting: false }),
+      onStatus: (message) => setPairing((p) => p && { ...p, message, waiting: true }),
+      onDone: (r) => {
+        ctl.current = null;
+        void reload();
         setPairing(null);
-      } else {
-        push('ペアリング失敗: ' + r.error);
-        setPairing({ devices: [], confirm: null, message: r.error });
-      }
-    };
-    activePairing = s;
-    setPairing({ devices: [], confirm: null, message: '近くの端末を探しています…相手の端末でも「ペアを追加」を開いてください' });
-    s.start();
-  };
-
-  const startLink = async (r: 'host' | 'guest') => {
-    if (Platform.OS !== 'android') return;
-    // 権限ダイアログの await 中に二重で押されても、リンクが2本走らないよう、同期的に弾く
-    if (startingLink) return;
-    startingLink = true;
-    try { await startLinkInner(r); } finally { startingLink = false; }
-  };
-  const startLinkInner = async (r: 'host' | 'guest') => {
-    activeLink?.stop();
-    if (activeTicker) clearInterval(activeTicker);
-    activeLink = null; activeTicker = null;
-    const pair = pairRef.current;
-    if (!pair || !identity) { push('先に「ペアを追加」で相手の端末とペアリングしてください'); return; }
-    stopPairing();
-    const res = await PermissionsAndroid.requestMultiple(PERMS);
-    push('権限: ' + Object.entries(res).map(([k, v]) => `${k.split('.').pop()}=${v === 'granted' ? 'OK' : v}`).join(' '));
-    KeepAlive.start();
-    const sup = createLink(
-      nearbyApi,
-      { role: r, selfId: identity.id, pair: { peerId: pair.peerId, secret: pair.secret }, connectTimeoutMs: 30000 },
-      (body) => {
-        if ((body as any)?.kind === 'wifi' && r === 'guest') {
-          void joinFromHost(body as any);
-        } else if ((body as any)?.kind === 'wifi-result') {
-          const b = body as any;
-          push(`子機の到達確認: ${b.ok ? `OK ${b.rttMs}ms (gw ${b.gateway})` : `NG ${b.error ?? ''}`}`);
-        } else if ((body as any)?.kind !== 'tick') push('受信 ' + JSON.stringify(body));
+        Alert.alert(r.ok ? 'ペアリング完了' : 'ペアリング失敗', r.ok ? `${r.pair.peerName} とペアになりました。以後は自動で接続します。` : r.error);
       },
+    });
+  };
+  const cancelPairing = () => { ctl.current?.cancel(); ctl.current = null; setPairing(null); };
+
+  const chooseRole = async (r: 'host' | 'guest') => { await tether.setDeviceRole(r); setDeviceRole(r); };
+  const changeRole = () => Alert.alert('役割を変更', '親機・子機の役割を入れ替えます。ペアは作り直しが必要です。', [
+    { text: 'キャンセル', style: 'cancel' },
+    { text: '変更する', onPress: () => run((async () => { for (const p of await tether.pairs()) await tether.removePair(p.peerId); await reload(); await tether.setDeviceRole(deviceRole === 'host' ? 'guest' : 'host'); setDeviceRole(await tether.deviceRole()); })()) },
+  ]);
+
+  if (deviceRole === undefined) return <View style={styles.root} />;
+  if (deviceRole === null && !introDone) return <Intro onDone={() => setIntroDone(true)} />;
+  if (deviceRole === null) {
+    return (
+      <View style={styles.root}>
+        <View style={styles.appBar}><Text style={styles.title}>この端末の役割を選んでください</Text></View>
+        <View style={styles.content}>
+          <Text style={styles.secondary}>一度選ぶと、以後はずっとこの役割で動きます(あとから変更もできます)。</Text>
+          <RoleCard icon="📶" title="親機" body="携帯回線を持つ端末。回線を子機に貸します。この端末の通信量と電池を使います。" onPress={() => run(chooseRole('host'))} />
+          <RoleCard icon="📱" title="子機" body="回線を持たない端末。親機の回線でインターネットに出ます。親機の近くで使います。" onPress={() => run(chooseRole('guest'))} />
+        </View>
+        <StatusBar style="dark" />
+      </View>
     );
-    sup.onState = (s, n) => {
-      setState(s === 'connecting' ? `接続中(${n + 1}回目)` : s === 'connected' ? '接続済み' : s === 'waiting' ? '再試行待ち' : '停止');
-      push('状態: ' + s);
-      // 親機: つながり直したら、共有中の接続情報を再送する(Wi-Fi Direct は作り直さず、子機は同じ SSID を再利用する)
-      if (s === 'connected' && r === 'host' && shareMsg.current) {
-        sup.send(shareMsg.current, { key: 'wifi', ttlMs: 60000 });
-        push('再接続: 接続情報を再送');
-      }
-    };
-    link.current = sup;
-    activeLink = sup;
-    setRole(r);
-    void sup.run();
-    if (r === 'host') {
-      let n = 0;
-      ticker.current = setInterval(() => sup.send({ kind: 'tick', n: ++n }, { ttlMs: 0 }), 3000);
-      activeTicker = ticker.current;
-    }
-  };
+  }
 
-  // 親機: LocalOnlyHotspot を試し、だめなら Wi-Fi Direct に切り替える。接続情報は Nearby 経由で子機へ送る
-  const sharing = useRef(false);
-  const startShare = async (m: 'lohs' | 'direct') => {
-    // LOHS の要求は OS 内で長く待たされることがある(実測 69 秒)。重ねて押すと「active request」で失敗するため弾く
-    if (sharing.current) { push('共有を準備中です。しばらくお待ちください'); return; }
-    sharing.current = true;
-    try { await doShare(m); } finally { sharing.current = false; }
-  };
-  const doShare = async (want: 'lohs' | 'direct') => {
-    // 押し直しても失敗しないよう、前回の共有を先に止める。
-    // Wi-Fi Direct のグループ(p2p0)が残っていると、この端末では LOHS の AP を作れないため、消えるのを待つ。
-    Hotspot.stopSocks();
-    Hotspot.stopHotspot();
-    await Hotspot.stopDirect();
-    await new Promise((r) => setTimeout(r, 1500));
-    // 子機は承認済みの SSID が見えた瞬間に自動参加して到達確認をする。待たせて拒否されないよう、ポートを先に開けておく
-    try { Hotspot.startEcho(9000); } catch (e: any) { push('エコー起動失敗: ' + (e?.message ?? e)); }
-    // SOCKS5(子機の回線用)。認証情報は接続ごとに作り、Nearby の暗号化された経路でだけ子機へ渡す。
-    const hex = (n: number) => Array.from(Crypto.getRandomBytes(n), (b) => b.toString(16).padStart(2, '0')).join('');
-    const socks = { port: 1080, user: 'u' + hex(4), pass: hex(12) };
-    try {
-      const { network } = await Hotspot.startSocks(socks.port, socks.user, socks.pass);
-      push(`SOCKS5 起動 (出口: ${network === 'cellular' ? '携帯回線' : '既定の回線'})`);
-      const t = await Hotspot.socksSelfTest(socks.port, socks.user, socks.pass);
-      push(`SOCKS 自己診断: ${t.ok ? `OK ${t.line}` : `NG ${t.error ?? t.line}`}`);
-    } catch (e: any) {
-      push('SOCKS 失敗: ' + (e?.message ?? e));
-    }
-    let method = want === 'lohs' ? 'LocalOnlyHotspot' : 'WifiDirect';
-    let cred: { ssid: string; passphrase: string } | null = null;
-    if (want === 'lohs') {
-      for (let i = 1; i <= 3 && !cred; i++) {
-        const t0 = Date.now();
-        try {
-          cred = await Hotspot.startHotspot();
-          push(`LocalOnlyHotspot 成功(${i}回目, ${Date.now() - t0}ms)`);
-        } catch (e: any) {
-          push(`LocalOnlyHotspot 失敗 ${i}/3 (${Date.now() - t0}ms): ${e?.message ?? e}`);
-          if (i < 3) await new Promise((r) => setTimeout(r, 2000));
-        }
-      }
-      if (!cred) return;
-    } else {
-      // SSID・パスフレーズ・チャンネル(2.4GHz ch6)をペアごとに固定する(保存済みがあればそれを使う。承認の記憶が効く)
-      const pair = pairRef.current;
-      if (!pair || !identity) { push('ペアがありません'); return; }
-      const { ssid: name, pass } = await directCreds({ hmac: nearbyApi.hmac, kv: secureKv, selfId: identity.id, peerId: pair.peerId, secret: pair.secret });
-      const t0 = Date.now();
-      try {
-        cred = await Hotspot.startDirect(name, pass, 2437);
-        push(`Wi-Fi Direct 成功(${Date.now() - t0}ms, 固定 ch6)`);
-      } catch (e: any) {
-        push(`Wi-Fi Direct 失敗(${Date.now() - t0}ms): ${e?.message ?? e}`);
-        return;
-      }
-    }
-    push(`${method} 起動 ssid=${cred.ssid}`);
-    shareMsg.current = { kind: 'wifi', method, ssid: cred.ssid, pass: cred.passphrase, port: 9000, socks };
-    link.current?.send(shareMsg.current, { key: 'wifi', ttlMs: 60000 });
-    push('接続情報を子機へ送信');
-  };
-
-  // 子機: 受け取った接続情報で参加し、親機のポートへ到達できるか確かめて結果を返す
-  const joinFromHost = async (m: { ssid: string; pass: string; port: number; socks?: { port: number; user: string; pass: string } }) => {
-    push(`接続情報を受信 ssid=${m.ssid} → 参加(端末の承認ダイアログが出たら許可)`);
-    try {
-      // 固定 SSID なら、承認ダイアログで「常に許可」を選んだ後は OS が覚える。Suggestion は同じ SSID と競合しうるので使わない
-      const { gateway } = await Hotspot.joinWifi(m.ssid, m.pass);
-      if (m.ssid) push(`参加 ${m.ssid}`);
-      push(`参加 gateway=${gateway}`);
-      // 親機のポートが開くのが少し遅れることがあるので、2秒おきに最大10回まで再試行する
-      let res = await Hotspot.probe(gateway, m.port);
-      for (let i = 1; i < 10 && !res.ok; i++) {
-        push(`到達確認 NG(${i}/10): ${res.error}`);
-        await new Promise((r) => setTimeout(r, 2000));
-        res = await Hotspot.probe(gateway, m.port);
-      }
-      push(`到達確認 ${res.ok ? `OK ${res.rttMs}ms` : `NG ${res.error}`}`);
-      link.current?.send({ kind: 'wifi-result', gateway, ...res }, { ttlMs: 60000 });
-      if (res.ok && m.socks) await startVpn(gateway, m.socks);
-    } catch (e: any) {
-      push('参加失敗: ' + (e?.message ?? e));
-      link.current?.send({ kind: 'wifi-result', ok: false, error: String(e?.message ?? e) }, { ttlMs: 60000 });
-    }
-  };
-
-  // 子機: 全通信を親機の SOCKS5 へ流す VPN を張る(初回は端末の VPN 許可ダイアログが出る)
-  const startVpn = async (gateway: string, socks: { port: number; user: string; pass: string }) => {
-    try {
-      for (let i = 0; i < 60 && !VpnTunnel.prepare(); i++) {
-        if (i === 0) push('VPN の許可ダイアログで「OK」を押してください');
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-      if (!Hotspot.bindToJoined()) push('Wi-Fi への固定に失敗');
-      VpnTunnel.start(gateway, socks.port, socks.user, socks.pass);
-      await new Promise((r) => setTimeout(r, 1500));
-      const st = VpnTunnel.status();
-      push(`VPN ${st.running ? '起動' : '失敗'}${st.error ? ' ' + st.error : ''}`);
-    } catch (e: any) {
-      push('VPN 失敗: ' + (e?.message ?? e));
-    }
-  };
+  const roleText = s.role ? (s.role === 'host' ? '親機(回線を共有)' : '子機(親機の回線を借りる)') : `未開始(この端末は${s.autoRole === 'host' ? '親機' : '子機'}になります)`;
+  const stateRows: [string, string][] = [
+    ['役割', roleText],
+    ['リンク', `${LINK_TEXT[s.link]}${s.pending ? `(未送達 ${s.pending} 件)` : ''}`],
+    ...(s.role === 'host' ? [['回線の共有', `${SHARE_TEXT[s.share]}${s.shareMethod ? `(${s.shareMethod})` : ''}${s.peerReach ? ` / 子機の到達 ${s.peerReach.ok ? 'OK' : 'NG'}` : ''}`] as [string, string]] : []),
+    ...(s.role === 'guest' ? [['VPN', VPN_TEXT[s.vpn]] as [string, string]] : []),
+  ];
 
   return (
-    <ScrollView contentContainerStyle={styles.root}>
-      <Text style={styles.h}>Tether Auto Connect</Text>
+    <View style={styles.root}>
+      <View style={styles.appBar}><Text style={styles.title}>Tether Auto Connect</Text></View>
+      <ScrollView contentContainerStyle={styles.content}>
+        <Text style={styles.label}>この端末</Text>
+        <View style={[styles.card, styles.listRow]}>
+          <Text style={{ fontSize: 32 }}>{deviceRole === 'host' ? '📶' : '📱'}</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.primary}>{deviceRole === 'host' ? '親機' : '子機'} · {identity ? identity.name : '…'}</Text>
+            <Text style={styles.secondary}>{deviceRole === 'host' ? '回線を子機に貸します' : '親機の回線を借ります'}</Text>
+          </View>
+          <Btn kind="text" title="変更" onPress={changeRole} />
+        </View>
 
-      <Text style={styles.sec}>端末間リンク(開発版)</Text>
-      <Text>この端末: {identity ? `${identity.name}(${identity.id})` : '…'}</Text>
-      <Text>ペア: {pairs.length ? pairs.map((p) => p.peerName).join(', ') : 'なし'}</Text>
-      {pairing ? (
-        <View style={styles.log}>
-          {pairing.confirm ? (
+        <Text style={styles.label}>ペア</Text>
+        <View style={styles.card}>
+          {pairs.length === 0 && <Text style={styles.secondary}>まだありません。「ペアを追加」で近くの端末と組みます。</Text>}
+          {pairs.map((p, i) => (
+            <View key={p.peerId} style={[styles.listRow, i > 0 && styles.divider]}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.primary}>{p.peerName}</Text>
+                <Text style={styles.secondary}>{p.role === 'host' ? '親機として使う' : p.role === 'guest' ? '子機として使う' : p.peerId}</Text>
+              </View>
+              <Btn kind="text" danger title="削除" onPress={() => Alert.alert('ペアを削除', `${p.peerName} とのペアを削除します。共有コードも破棄されます。`, [
+                { text: 'キャンセル', style: 'cancel' },
+                { text: '削除', style: 'destructive', onPress: () => run(tether.removePair(p.peerId).then(reload)) },
+              ])} />
+            </View>
+          ))}
+          <Btn kind="tonal" title={deviceRole === 'host' ? 'ペアを追加(子機を待つ)' : 'ペアを追加(親機を探す)'} onPress={() => run(addPair(deviceRole))} />
+        </View>
+
+        <Text style={styles.label}>状態</Text>
+        <View style={styles.card}>
+          {stateRows.map(([k, v], i) => (
+            <View key={k} style={[styles.listRow, i > 0 && styles.divider]}>
+              <Text style={[styles.secondary, { width: 96 }]}>{k}</Text>
+              <Text style={[styles.primary, { flex: 1 }]}>{v}</Text>
+            </View>
+          ))}
+          {s.error && <Text style={styles.err}>{s.error}</Text>}
+        </View>
+
+        <View style={styles.actions}>
+          {s.started ? (
             <>
-              <Text style={{ fontSize: 16 }}>相手: {pairing.confirm.peerName}</Text>
-              <Text style={{ fontSize: 40, fontWeight: '700', letterSpacing: 6 }}>{pairing.confirm.digits}</Text>
-              <Text>相手の画面にも同じ数字が出ていることを確認してください</Text>
-              <Button title="一致する" onPress={() => pairing.confirm!.accept()} />
-              <Button title="一致しない" onPress={() => pairing.confirm!.reject()} />
+              <Btn kind="filled" title="停止" onPress={() => tether.stop()} />
+              {s.role === 'guest' && (s.vpn === 'held'
+                ? <Btn kind="tonal" title="VPN を再開" onPress={() => run(tether.resumeVpn())} />
+                : <Btn kind="tonal" title="VPN を止める(通信できないとき)" onPress={() => tether.stopVpn()} />)}
             </>
           ) : (
-            <>
-              <Text>{pairing.message}</Text>
-              {pairing.devices.map((d) => (
-                <Button key={d.endpointId} title={`${d.label} とペアにする`} onPress={() => activePairing?.connectTo(d.endpointId)} />
-              ))}
-            </>
+            <Btn kind="filled" title="開始(役割は自動)" disabled={!pairs.length} onPress={() => run(tether.start())} />
           )}
-          <Button title="ペアリングをやめる" onPress={stopPairing} />
         </View>
-      ) : (
-        !role && (
-          <>
-            <Button title="ペアを追加(近くの端末を探す)" onPress={startPairing} />
-            {pairs.map((p) => (
-              <Button key={p.peerId} title={`削除: ${p.peerName}`} color="#b00020" onPress={() => pairStore.remove(p.peerId).then(reloadPairs)} />
-            ))}
-          </>
-        )
-      )}
-      <Text>状態: {state}{role ? ` / ${role === 'host' ? '親機' : '子機'}` : ''}</Text>
-      {pairing ? null : !role ? (
-        <>
-          <Text>セルラー回線: {cellular ? 'あり → 親機になります' : 'なし → 子機になります'}</Text>
-          <Button title={`開始(自動: ${cellular ? '親機' : '子機'})`} onPress={() => startLink(cellular ? 'host' : 'guest')} />
-          {cellular && <Button title="子機として使う(別の親機の回線を借りる)" onPress={() => startLink('guest')} />}
-          <Button title="回線の有無を再判定" onPress={() => setCellular(Hotspot.hasCellular())} />
-        </>
-      ) : (
-        <>
-          {role === 'host' && <Button title="共有: LOHS(毎回SSIDが変わる)" onPress={() => startShare('lohs')} />}
-          {role === 'host' && <Button title="共有: Wi-Fi Direct(SSID固定・実験)" onPress={() => startShare('direct')} />}
-          <Button title="停止" onPress={stopLink} />
-          <Button title="VPN停止(通信が止まったとき)" onPress={() => { VpnTunnel.stop(); Hotspot.unbindProcess(); push('VPN 停止'); }} />
-        </>
-      )}
-      <View style={styles.log}>
-        {log.map((l, i) => (
-          <Text key={i} style={styles.logLine}>{l}</Text>
-        ))}
-      </View>
 
+        <Text style={styles.label}>ログ</Text>
+        <View style={styles.card}>
+          {log.map((l, i) => <Text key={i} style={styles.logLine}>{l}</Text>)}
+        </View>
+
+        <DiagnosticsPanel tether={tether} />
+      </ScrollView>
+
+      <Modal visible={!!pairing} transparent animationType="fade" statusBarTranslucent onRequestClose={cancelPairing}>
+        <View style={styles.scrim}>
+          <View style={styles.dialog}>
+            {pairing?.confirm ? (
+              <>
+                <Text style={styles.dialogTitle}>この数字は一致していますか?</Text>
+                <Text style={styles.secondary}>{pairing.confirm.peerName} の画面にも同じ数字が出ています。</Text>
+                <Text style={styles.digits}>{pairing.confirm.digits}</Text>
+                {pairing.waiting && <View style={styles.row}><ActivityIndicator color={C.primary} /><Text style={styles.primary}>{pairing.message}</Text></View>}
+                <View style={styles.dialogActions}>
+                  <Btn kind="text" title="やめる" onPress={cancelPairing} />
+                  {!pairing.waiting && <Btn kind="text" danger title="一致しない" onPress={() => pairing.confirm!.reject()} />}
+                  {!pairing.waiting && <Btn kind="text" title="一致する" onPress={() => pairing.confirm!.accept()} />}
+                </View>
+              </>
+            ) : (
+              <>
+                <Text style={styles.dialogTitle}>{pairing?.role === 'host' ? '子機からの接続を待っています' : '親機を探しています'}</Text>
+                <View style={styles.row}>
+                  <ActivityIndicator color={C.primary} />
+                  <Text style={[styles.secondary, { flex: 1 }]}>
+                    {pairing?.waiting ? pairing.message : pairing?.role === 'host' ? '子機にする端末で「この端末を子機にする」を押してください' : '親機にする端末で「この端末を親機にする」を押してください'}
+                  </Text>
+                </View>
+                {pairing?.role === 'guest' && (pairing.devices.length ? (
+                  <>
+                    <Text style={styles.secondary}>見つかった親機(タップで接続を要求)</Text>
+                    {pairing.devices.map((d) => (
+                      <Pressable key={d.endpointId} android_ripple={{ color: C.ripple }} style={[styles.listRow, styles.deviceRow]} onPress={() => ctl.current?.connectTo(d.endpointId)}>
+                        <Text style={{ fontSize: 28 }}>📱</Text>
+                        <Text style={[styles.primary, { flex: 1 }]}>{d.label}</Text>
+                        <Text style={{ color: C.primary, fontSize: 16, fontWeight: '600' }}>接続</Text>
+                      </Pressable>
+                    ))}
+                  </>
+                ) : <Text style={styles.secondary}>まだ見つかっていません…</Text>)}
+                <View style={styles.dialogActions}>
+                  <Btn kind="text" title="キャンセル" onPress={cancelPairing} />
+                </View>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
       <StatusBar style="dark" />
-    </ScrollView>
+    </View>
+  );
+}
+
+// Material 3(ライト)に寄せた配色と部品。外部ライブラリは使わない。
+const C = { primary: '#1a6b4b', onPrimary: '#fff', container: '#cfe9dc', surface: '#fbfdf9', card: '#eef3ee', text: '#191c1a', sub: '#5a625d', line: '#d6ddd7', error: '#ba1a1a', ripple: 'rgba(26,107,75,0.16)' };
+
+const SLIDES = [
+  { icon: '🔁', title: 'テザリング、毎回つなぎ直していませんか', body: 'スマホを2台お持ちの方へ。\n勝手に切れる。毎回手でオンにする。つなぐたびに確認が出る。\nそんな手間を、なくします。' },
+  { icon: '📶 ⇄ 📱', title: '一度ペアにすれば、あとは自動', body: '回線を持つ「親機」と、持たない「子機」。\n一度ペアにするだけで、近づけば自動でつながります。' },
+  { icon: '📶', title: '親機とは', body: '携帯回線(SIM)を持つ端末です。\nこの端末の回線を、近くの子機に貸します。\n子機の通信量は、親機の契約から使われ、電池も消費します。\n子機が近くにいる間は、アプリを動かしたままにしてください。' },
+  { icon: '📱', title: '子機とは', body: '2台目のスマホ(回線を持たない、または使いたくない端末)です。\n親機の回線でインターネットに出ます。\n子機が回線を持っていても、役割は自分で選べます。' },
+  { icon: '🚶‍♂️↩️', title: '離れても、戻れば自動で復旧', body: '距離で切れても、戻れば元どおり。\n切れている間は子機の通信を素に戻すので、止まったままになりません。' },
+  { icon: '🔒', title: '安全のために', body: 'ペアごとに違う暗号の鍵を作り、通信内容は保存しません。\n連絡先や画面の内容は読み取りません。' },
+];
+
+/** 初回だけ出す、機能説明のカルーセル(横スワイプ)。最後に役割の選択へ進む */
+function Intro({ onDone }: { onDone(): void }) {
+  const { width } = useWindowDimensions();
+  const ref = useRef<ScrollViewInstance>(null);
+  const [page, setPage] = useState(0);
+  const last = page === SLIDES.length - 1;
+  const go = (i: number) => { ref.current?.scrollTo({ x: i * width, animated: true }); setPage(i); };
+  return (
+    <View style={styles.root}>
+      <View style={styles.introTop}>{!last && <Btn kind="text" title="スキップ" onPress={onDone} />}</View>
+      <ScrollView ref={ref} horizontal pagingEnabled showsHorizontalScrollIndicator={false}
+        onMomentumScrollEnd={(e) => setPage(Math.round(e.nativeEvent.contentOffset.x / width))}>
+        {SLIDES.map((sl) => (
+          <View key={sl.title} style={[styles.slide, { width }]}>
+            <View style={styles.hero}><Text style={styles.heroIcon}>{sl.icon}</Text></View>
+            <Text style={styles.slideTitle}>{sl.title}</Text>
+            <Text style={styles.slideBody}>{sl.body}</Text>
+          </View>
+        ))}
+      </ScrollView>
+      <View style={styles.dots}>
+        {SLIDES.map((_, i) => <View key={i} style={[styles.dot, i === page && styles.dotOn]} />)}
+      </View>
+      <View style={styles.introBottom}>
+        <Btn kind="filled" title={last ? 'はじめる' : '次へ'} onPress={() => (last ? onDone() : go(page + 1))} />
+      </View>
+      <StatusBar style="dark" />
+    </View>
+  );
+}
+
+function RoleCard({ icon, title, body, onPress }: { icon: string; title: string; body: string; onPress(): void }) {
+  return (
+    <Pressable onPress={onPress} android_ripple={{ color: C.ripple }} style={[styles.card, styles.roleCard]}>
+      <Text style={{ fontSize: 44 }}>{icon}</Text>
+      <View style={{ flex: 1 }}>
+        <Text style={[styles.dialogTitle, { color: C.primary }]}>{title}</Text>
+        <Text style={styles.secondary}>{body}</Text>
+      </View>
+    </Pressable>
+  );
+}
+
+function Btn({ title, onPress, kind, danger, disabled }: { title: string; onPress(): void; kind: 'filled' | 'tonal' | 'text'; danger?: boolean; disabled?: boolean }) {
+  const bg = kind === 'filled' ? C.primary : kind === 'tonal' ? C.container : 'transparent';
+  const fg = kind === 'filled' ? C.onPrimary : danger ? C.error : kind === 'tonal' ? '#0b2e20' : C.primary;
+  return (
+    <Pressable onPress={onPress} disabled={disabled} android_ripple={{ color: kind === 'filled' ? 'rgba(255,255,255,0.25)' : C.ripple }}
+      style={[styles.btn, { backgroundColor: bg, opacity: disabled ? 0.38 : 1 }, kind === 'text' && styles.btnText]}>
+      <Text style={{ color: fg, fontSize: 17, fontWeight: '600', letterSpacing: 0.1 }}>{title}</Text>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { backgroundColor: '#fff', padding: 24, paddingTop: 64, gap: 10 },
-  h: { fontSize: 24, fontWeight: '700' },
-  sec: { fontSize: 16, fontWeight: '700', marginTop: 16 },
-  log: { backgroundColor: '#f3f3f3', padding: 8, minHeight: 120 },
-  logLine: { fontSize: 11, fontFamily: 'monospace' },
+  root: { flex: 1, backgroundColor: C.surface },
+  appBar: { paddingTop: 48, paddingBottom: 12, paddingHorizontal: 20, backgroundColor: C.surface },
+  title: { fontSize: 28, color: C.text },
+  content: { padding: 16, paddingTop: 4, gap: 8, paddingBottom: 40 },
+  label: { fontSize: 15, color: C.primary, fontWeight: '600', marginTop: 12, marginLeft: 4 },
+  card: { backgroundColor: C.card, borderRadius: 20, padding: 18, gap: 10 },
+  listRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12 },
+  divider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.line },
+  primary: { fontSize: 18, color: C.text },
+  secondary: { fontSize: 15, color: C.sub },
+  err: { color: C.error, fontSize: 15 },
+  actions: { gap: 8, marginTop: 16 },
+  btn: { height: 52, borderRadius: 26, paddingHorizontal: 24, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  btnText: { paddingHorizontal: 14 },
+  logLine: { fontSize: 12, fontFamily: 'monospace', color: C.sub },
+  scrim: { flex: 1, backgroundColor: 'rgba(0,0,0,0.32)', justifyContent: 'center', padding: 28 },
+  dialog: { backgroundColor: C.surface, borderRadius: 28, padding: 24, gap: 14 },
+  dialogTitle: { fontSize: 26, color: C.text },
+  dialogActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 4, marginTop: 6 },
+  deviceRow: { backgroundColor: C.card, borderRadius: 16, paddingHorizontal: 14, overflow: 'hidden' },
+  introTop: { height: 96, paddingTop: 44, paddingHorizontal: 12, alignItems: 'flex-end' },
+  slide: { paddingHorizontal: 32, alignItems: 'center', justifyContent: 'center', gap: 20 },
+  hero: { width: 220, height: 220, borderRadius: 110, backgroundColor: C.container, alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
+  heroIcon: { fontSize: 56 },
+  slideTitle: { fontSize: 26, color: C.text, textAlign: 'center', fontWeight: '500' },
+  slideBody: { fontSize: 17, color: C.sub, textAlign: 'center', lineHeight: 27 },
+  dots: { flexDirection: 'row', justifyContent: 'center', gap: 8, paddingVertical: 16 },
+  dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: C.line },
+  dotOn: { width: 24, backgroundColor: C.primary },
+  introBottom: { paddingHorizontal: 24, paddingBottom: 36 },
+  roleCard: { flexDirection: 'row', alignItems: 'center', gap: 16, padding: 22, overflow: 'hidden' },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  digits: { fontSize: 56, fontWeight: '500', letterSpacing: 8, color: C.primary, textAlign: 'center', paddingVertical: 8 },
 });

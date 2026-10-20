@@ -19,6 +19,8 @@ import android.os.Looper
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -86,6 +88,17 @@ class HotspotModule : Module() {
       }
     }
     Function("stopHotspot") { reservation?.close(); reservation = null }
+
+    // ---- 能力調査(副作用なし。詳細は CapabilityProbe.kt)----
+    Function("capabilities") { CapabilityProbe.collect(ctx) }
+    /** 診断レポート(網羅的な採取。副作用なし)と、そのファイル書き出し。詳細は DiagnosticReport.kt */
+    Function("diagnostics") { DiagnosticReport.collect(ctx) }
+    Function("saveDiagnosticFile") { name: String, text: String -> DiagnosticReport.writeFile(ctx, name, text) }
+    /** LocalOnlyHotspot を一瞬だけ起動して閉じる。共有中は呼ばない(呼び出し側で防ぐ) */
+    AsyncFunction("probeLohs") { promise: Promise ->
+      if (reservation != null) promise.resolve(mapOf("ok" to false, "reason" to "busy"))
+      else CapabilityProbe.probeLohs(ctx) { promise.resolve(it) }
+    }
 
     /**
      * Wi-Fi Direct グループを、固定の名前・パスフレーズで作る(LocalOnlyHotspot が使えない端末向けの代替)。
@@ -187,7 +200,7 @@ class HotspotModule : Module() {
             if (r[1].toInt() != 0) { promise.resolve(mapOf("ok" to false, "error" to "connect rep=${r[1]} ${socksRef?.lastError ?: ""}")); return@Thread }
             o.write("HEAD / HTTP/1.0\r\nHost: example.com\r\n\r\n".toByteArray()); o.flush()
             val line = i.bufferedReader().readLine()
-            promise.resolve(mapOf("ok" to (line?.startsWith("HTTP/") == true), "line" to (line ?: "")))
+            promise.resolve(mapOf("ok" to (line?.startsWith("HTTP/") == true), "line" to (line ?: ""), "udp" to udpSelfTest(port, user, pass)))
           }
         } catch (e: Exception) {
           promise.resolve(mapOf("ok" to false, "error" to (e.message ?: e.toString())))
@@ -245,13 +258,31 @@ class HotspotModule : Module() {
     Function("leaveWifi") { leave() }
 
     /** セルラー回線(INTERNET 能力つき)があるか。役割(親機/子機)の自動判定に使う。 */
+    /** 親機が今つないでいる Wi-Fi の周波数(MHz)。未接続は 0。Direct のチャンネルを合わせるのに使う */
+    Function("wifiFrequency") {
+      val w = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+      @Suppress("DEPRECATION") val i = w.connectionInfo
+      if (i != null && i.networkId != -1) i.frequency else 0
+    }
+    /**
+     * 親機として共有できる携帯回線があるか。
+     * Wi-Fi 接続中は、携帯のデータ接続が切られて(要求されるまで張られない)、回線の網が見えないことがある。
+     * そのため「いま網がある」か、「SIM が使える状態で、モバイルデータがオン」のどちらかなら true とする。
+     * 実際に使うときは、startSocks が回線を要求して張る。
+     */
     Function("hasCellular") {
       @Suppress("DEPRECATION")
-      cm.allNetworks.any { n ->
+      val live = cm.allNetworks.any { n ->
         val c = cm.getNetworkCapabilities(n)
         c != null && c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
           c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
       }
+      if (live) return@Function true
+      val tm = ctx.getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager
+      val slots = maxOf(1, tm.activeModemCount)
+      val simReady = (0 until slots).any { tm.getSimState(it) == android.telephony.TelephonyManager.SIM_STATE_READY }
+      val dataOn = android.provider.Settings.Global.getInt(ctx.contentResolver, "mobile_data", 1) == 1
+      simReady && dataOn
     }
 
     /**
@@ -431,6 +462,31 @@ class HotspotModule : Module() {
     for (id in 0..7) runCatching { method.invoke(m, ch, id, null) }
     Log.i(TAG, "deletePersistentGroup requested for netId 0..7")
   }
+
+  /** UDP ASSOCIATE の自己診断: 8.8.8.8 へ DNS(example.com の A)を引いて、応答が返れば true */
+  private fun udpSelfTest(port: Int, user: String, pass: String): Boolean = try {
+    Socket().use { s ->
+      s.connect(InetSocketAddress("127.0.0.1", port), 3000)
+      s.soTimeout = 8000
+      val o = s.getOutputStream(); val i = s.getInputStream()
+      o.write(byteArrayOf(5, 1, 2)); i.readNBytes(ByteArray(2), 0, 2)
+      val ub = user.toByteArray(); val pb = pass.toByteArray()
+      o.write(byteArrayOf(1, ub.size.toByte()) + ub + byteArrayOf(pb.size.toByte()) + pb); i.readNBytes(ByteArray(2), 0, 2)
+      o.write(byteArrayOf(5, 3, 0, 1, 0, 0, 0, 0, 0, 0)); o.flush()
+      val r = ByteArray(10); i.readNBytes(r, 0, 10)
+      if (r[1].toInt() != 0) return@use false
+      val bport = ((r[8].toInt() and 0xff) shl 8) or (r[9].toInt() and 0xff)
+      val q = byteArrayOf(0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7) + "example".toByteArray() + byteArrayOf(3) + "com".toByteArray() + byteArrayOf(0, 0, 1, 0, 1)
+      val pkt = byteArrayOf(0, 0, 0, 1, 8, 8, 8, 8, 0, 53) + q
+      DatagramSocket().use { u ->
+        u.soTimeout = 5000
+        u.send(java.net.DatagramPacket(pkt, pkt.size, InetAddress.getByName("127.0.0.1"), bport))
+        val buf = ByteArray(1500); val p = java.net.DatagramPacket(buf, buf.size)
+        u.receive(p)
+        p.length > 10 + 12 && buf[10] == 0x12.toByte() && buf[11] == 0x34.toByte()
+      }
+    }
+  } catch (e: Exception) { false }
 
   private fun create(m: WifiP2pManager, ch: WifiP2pManager.Channel, cfg: WifiP2pConfig, name: String, pass: String, promise: Promise, retry: Int) {
     try {
