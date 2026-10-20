@@ -14,7 +14,7 @@ export const testRandomHex = (bytes: number) =>
   Array.from({ length: bytes }, () => ((n++ * 37 + 11) % 256).toString(16).padStart(2, '0')).join('');
 
 /** 端末の部品の偽物。呼び出しを calls に記録する。 */
-export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; joinError?: string; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[] } = {}) {
+export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; joinError?: string; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[]; backgroundLocation?: boolean } = {}) {
   const calls: string[] = [];
   const files: Record<string, string> = {};
   const wifiLost = new Set<() => void>();
@@ -89,6 +89,8 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     vpn,
     keepAlive: { start: () => void calls.push('keepAliveStart'), stop: () => void calls.push('keepAliveStop') },
     missingPermissions: async () => [...(o.missingPerms ?? [])],
+    backgroundLocationGranted: async () => o.backgroundLocation ?? true,
+    openAppSettings: async () => void calls.push('openAppSettings'),
     requestPermissions: async () => (calls.push('requestPermissions'), true),
     randomHex: testRandomHex,
     sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))),

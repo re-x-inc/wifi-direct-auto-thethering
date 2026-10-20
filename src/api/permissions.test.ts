@@ -18,8 +18,10 @@ test('API 37 は 33–36 の組に ACCESS_LOCAL_NETWORK を足しただけ(NEARB
 
 test('既存の版ごとの組は変わらない', () => {
   assert.deepEqual(permsFor(30), ['android.permission.ACCESS_FINE_LOCATION']);
-  assert.equal(permsFor(31).length, 4);
-  assert.equal(permsFor(34).length, 5);
+  assert.equal(permsFor(31).length, 5);
+  assert.equal(permsFor(34).length, 6);
+  assert.ok(permsFor(34).includes('android.permission.ACCESS_COARSE_LOCATION'));
+  assert.ok(permsFor(37).includes('android.permission.ACCESS_COARSE_LOCATION'));
 });
 
 const handlers = { onDevices() {}, onConfirm() {}, onDone() {} };
@@ -63,4 +65,18 @@ test('ensurePermissions は要求したうえで、残りの不足を返す', as
   assert.equal(r.granted, false);
   assert.deepEqual(r.missing, ['android.permission.ACCESS_LOCAL_NETWORK']);
   assert.ok(f.calls.includes('requestPermissions'));
+});
+
+test('backgroundLocation: 位置情報が足りなければ needs-foreground、無ければ denied、あれば granted。設定画面を開ける', async () => {
+  const mk = (o: any) => new Tether(fakePlatform(fakePairNet('1').a, o).platform);
+  assert.equal(await mk({ missingPerms: ['android.permission.ACCESS_COARSE_LOCATION'] }).backgroundLocation(), 'needs-foreground');
+  assert.equal(await mk({ backgroundLocation: false }).backgroundLocation(), 'denied');
+  assert.equal(await mk({}).backgroundLocation(), 'granted');
+  const f = fakePlatform(fakePairNet('1').a);
+  await new Tether(f.platform).openBackgroundLocationSettings();
+  assert.ok(f.calls.includes('openAppSettings'));
+});
+
+test('ACCESS_BACKGROUND_LOCATION は requestMultiple の組(permsFor)に混ぜない', () => {
+  for (const sdk of [28, 31, 34, 37]) assert.ok(!permsFor(sdk).includes('android.permission.ACCESS_BACKGROUND_LOCATION'));
 });

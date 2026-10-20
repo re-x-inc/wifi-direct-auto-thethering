@@ -185,7 +185,37 @@ class NearbyLinkModule : Module() {
   private fun report(op: String, e: Exception) {
     val code = (e as? com.google.android.gms.common.api.ApiException)?.statusCode ?: -1
     DhLog.w("DH-NEARBY", "$op failed code=$code ${com.google.android.gms.nearby.connection.ConnectionsStatusCodes.getStatusCodeString(code)} $e")
+    if (code == 8034) dumpPermissions(op)
     sendEvent("onError", mapOf("op" to op, "code" to code))
+  }
+
+  /**
+   * 8034 MISSING_PERMISSION_*: GMS が「このアプリに無い」と見た権限の手がかりを残す(実機: Wi-Fi Direct 参加の約 11 秒後に discover が 8034)。
+   * アプリが持つ権限・位置情報のモード・つながっているネットワークの種類を並べる。個人情報は含まない。
+   */
+  private fun dumpPermissions(op: String) {
+    try {
+      val ctx = appContext.reactContext ?: return
+      val perms = listOf(
+        "ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION", "ACCESS_BACKGROUND_LOCATION", "NEARBY_WIFI_DEVICES",
+        "BLUETOOTH_SCAN", "BLUETOOTH_ADVERTISE", "BLUETOOTH_CONNECT", "ACCESS_LOCAL_NETWORK",
+      ).joinToString(" ") {
+        val granted = ctx.checkSelfPermission("android.permission.$it") == android.content.pm.PackageManager.PERMISSION_GRANTED
+        "$it=$granted"
+      }
+      val lm = ctx.getSystemService(android.content.Context.LOCATION_SERVICE) as? android.location.LocationManager
+      val cm = ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+      val nets = cm?.allNetworks?.joinToString(",") { n ->
+        val c = cm.getNetworkCapabilities(n)
+        val kind = listOf("WIFI" to android.net.NetworkCapabilities.TRANSPORT_WIFI, "CELL" to android.net.NetworkCapabilities.TRANSPORT_CELLULAR, "VPN" to android.net.NetworkCapabilities.TRANSPORT_VPN)
+          .filter { c?.hasTransport(it.second) == true }.joinToString("+") { it.first }
+        val local = if (c?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true) "" else "(no-internet)"
+        kind + local
+      }
+      DhLog.w("DH-NEARBY", "8034 diag op=$op sdk=${android.os.Build.VERSION.SDK_INT} $perms locationEnabled=${lm?.isLocationEnabled} networks=[$nets]")
+    } catch (t: Throwable) {
+      DhLog.w("DH-NEARBY", "8034 diag failed $t")
+    }
   }
 
   // ---- 通常接続(ペア保存後)の省電力制御 ----

@@ -1,12 +1,12 @@
 import * as Crypto from 'expo-crypto';
-import { PermissionsAndroid, Platform } from 'react-native';
+import { Linking, PermissionsAndroid, Platform } from 'react-native';
 import Hotspot from '../../modules/hotspot';
 import KeepAlive from '../../modules/keep-alive';
 import NearbyLink from '../../modules/nearby-link';
 import VpnTunnel from '../../modules/vpn-tunnel';
 import { nearbyApi } from '../nearbyApi';
 import { secureKv } from '../pairing/secureKv';
-import { permsFor } from './permissions';
+import { BACKGROUND_LOCATION, needsBackgroundLocation, permsFor } from './permissions';
 import { Tether } from './tether';
 import { TetherConfig, TetherError, TetherPlatform } from './types';
 
@@ -65,6 +65,9 @@ export function nativePlatform(): TetherPlatform {
       for (const p of permsFor(Number(Platform.Version))) if (!(await PermissionsAndroid.check(p as any))) miss.push(p);
       return miss;
     },
+    backgroundLocationGranted: async () =>
+      !needsBackgroundLocation(Number(Platform.Version)) || (await PermissionsAndroid.check(BACKGROUND_LOCATION as any)),
+    openAppSettings: () => Linking.openSettings(),
     requestPermissions: async () => {
       const res = await PermissionsAndroid.requestMultiple(permsFor(Number(Platform.Version)) as any[]);
       return Object.values(res).every((v) => v === 'granted');

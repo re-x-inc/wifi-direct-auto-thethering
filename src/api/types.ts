@@ -128,6 +128,10 @@ export interface TetherPlatform {
   requestPermissions(): Promise<boolean>;
   /** 画面を出さずに、足りない実行時権限(android.permission.* のフルネーム)を返す。無ければ beginPairing は従来どおり再要求する */
   missingPermissions?(): Promise<string[]>;
+  /** 「常に許可」の位置情報が許可済みか。API 28 以下は常に true */
+  backgroundLocationGranted?(): Promise<boolean>;
+  /** このアプリの設定画面を開く(「常に許可」を選ばせる) */
+  openAppSettings?(): Promise<void>;
   randomHex(bytes: number): string;
   sleep(ms: number): Promise<void>;
   now(): number;

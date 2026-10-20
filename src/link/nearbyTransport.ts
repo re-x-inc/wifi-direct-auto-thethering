@@ -96,7 +96,11 @@ export class NearbyTransport implements Transport {
           if (e.endpointId !== this.endpoint) return;
           this.write({ t: 'hello', nonce: myNonce });
         }),
-        api.on('onError', (e) => console.log(`[DH] Nearby ${e.op} 失敗 code=${e.code}${e.code === 8012 || e.code === 8009 ? '(後始末のあと探索からやり直す)' : ''}`)),
+        api.on('onError', (e) => {
+          console.log(`[DH] Nearby ${e.op} 失敗 code=${e.code}${e.code === 8012 || e.code === 8009 ? '(後始末のあと探索からやり直す)' : ''}`);
+          // 権限の不足(8034 など)は待っても直らない。30 秒の timeout を待たず、理由つきで失敗させる(supervisor が間をおいて再試行する)
+          if (e.code === 8034 && (e.op === 'discover' || e.op === 'advertise')) fail(`missing-permission code=8034 op=${e.op}`);
+        }),
         api.on('onFailed', (e) => {
           this.gate.release(e.endpointId);
           if (e.endpointId === this.endpoint) fail('connection failed');

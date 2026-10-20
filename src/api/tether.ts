@@ -353,6 +353,26 @@ export class Tether {
     return { granted: ok && missing.length === 0, missing };
   }
 
+  /**
+   * 「常に許可」の位置情報の状態。背面で Nearby が 8034 にならないために要る。
+   * 'granted' 許可済み(または API 28 以下で不要) / 'denied' 未許可 / 'needs-foreground' 先にアプリ使用中の位置情報の許可が要る。
+   * 使い方: ensurePermissions() のあとに呼び、'denied' なら案内を出して openBackgroundLocationSettings() で設定画面へ(「常に許可」を選ばせる)。
+   * 設定から戻ったら再度この関数で確かめる。
+   */
+  async backgroundLocation(): Promise<'granted' | 'denied' | 'needs-foreground'> {
+    const missing = this.p.missingPermissions ? await this.p.missingPermissions() : [];
+    if (missing.some((m) => m.endsWith('LOCATION'))) return 'needs-foreground';
+    const ok = this.p.backgroundLocationGranted ? await this.p.backgroundLocationGranted() : true;
+    this.log(`位置情報(常に許可)=${ok ? 'granted' : 'denied'}`);
+    return ok ? 'granted' : 'denied';
+  }
+
+  /** このアプリの設定画面を開く。位置情報 →「常に許可」を選んでもらう */
+  async openBackgroundLocationSettings(): Promise<void> {
+    this.log('設定画面を開く(位置情報: 常に許可の案内)');
+    await this.p.openAppSettings?.();
+  }
+
   /** ペアリングをやめる(onDone は呼ばれない) */
   cancelPairing(): void {
     const s = this.pairing;
@@ -409,6 +429,11 @@ export class Tether {
         if (gen !== this.gen) return;
         this.set({ link: s, attempt: n });
         this.log('状態: ' + s);
+        // Wi-Fi Direct に参加すると Nearby(WIFI_LAN など)が落ちることがある。Direct の IP 経路(VPN→親機の SOCKS)は Nearby と独立なので、
+        // Direct / VPN は捨てず維持し、Nearby は裏で再探索するだけにする(onWifiLost だけが Direct の断を扱う)
+        if (s === 'waiting' && role === 'guest' && this.state.wifi === 'joined') {
+          this.log(`Nearby 切断(Direct 参加中: Direct・VPN は維持 vpn=${this.state.vpn}。Nearby は再探索する)`);
+        }
         if (s === 'connected') this.onConnected(role, gen);
       };
       this.link = sup;
@@ -908,6 +933,8 @@ export class Tether {
       // 固定 SSID なら、承認ダイアログで「常に許可」を選んだ後は OS が覚える
       const { gateway } = await h.joinWifi(m.ssid, m.pass);
       if (gen !== this.gen) return;
+      // join ok は OS が local-only ネットワークを渡しただけ。実際に親機まで届くかは、このあとの到達確認・VPN のログで見る
+      this.log(`参加 ok gw=${gateway} → 到達確認(link=${this.state.link})`);
       this.set({ wifi: 'joined' });
       // 親機のポートが開くのが少し遅れることがあるので、一定間隔で再試行する
       const retries = this.cfg.probeRetries ?? 10;
@@ -962,6 +989,7 @@ export class Tether {
       if (gen !== this.gen || this.vpnHold) return;
       const st = v.status();
       this.log(`VPN ${st.running ? '起動' : '失敗'}${st.error ? ' ' + st.error : ''}`);
+      this.log(`参加後の状態 wifi=${this.state.wifi} vpn=${st.running ? 'on' : 'failed'} link=${this.state.link} attempt=${this.state.attempt}`);
       this.set(st.running ? { vpn: 'on', error: null } : { vpn: 'failed', error: 'VPN を起動できませんでした' + (st.error ? `: ${st.error}` : '') });
     } catch (e: any) {
       this.log('VPN 失敗: ' + (e?.message ?? e));

@@ -65,3 +65,12 @@ test('認証前は Frame を送らない', async () => {
   host.send({ type: 'ping' });
   assert.equal(sent, 0);
 });
+
+test('discover が 8034(権限不足)で失敗したら、timeout を待たず理由つきで失敗する', async () => {
+  const { guestApi } = fakeNet();
+  guestApi.discover = () => queueMicrotask(() => guestApi.emit('onError', { op: 'discover', code: 8034 }));
+  const guest = new NearbyTransport(guestApi, { role: 'guest', selfId: 'GUEST', pair: { peerId: 'HOST', secret: 's' }, nonce: () => 'ng', connectTimeoutMs: 5000 });
+  const t0 = Date.now();
+  await assert.rejects(() => guest.connect(), /missing-permission code=8034/);
+  assert.ok(Date.now() - t0 < 1000);
+});
