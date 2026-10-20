@@ -196,3 +196,27 @@ test('接続すると pairs() の lastSeenAt が更新される', async () => {
   assert.equal(typeof (await hostT.pairs())[0].lastSeenAt, 'number');
   hostT.stop(); guestT.stop();
 });
+
+test('onJoinPrompt: show で案内が出て、ok/declined/timeout/cancelled のどれでも消える', async () => {
+  const { hostT, guestT, guest } = await setup();
+  await hostT.start(); await guestT.start();
+  await until(() => guestT.getState().vpn === 'on');
+  for (const phase of ['ok', 'declined', 'timeout', 'cancelled'] as const) {
+    guest.emitJoinPrompt({ ssid: 'DIRECT-x', phase: 'show', timeoutMs: 180000 });
+    assert.equal(guestT.getState().joinPrompt, true, 'show');
+    guest.emitJoinPrompt({ ssid: 'DIRECT-x', phase });
+    assert.equal(guestT.getState().joinPrompt, false, phase);
+  }
+  hostT.stop(); guestT.stop();
+});
+
+test('stop で許可画面の案内も消える', async () => {
+  const { hostT, guestT, guest } = await setup();
+  await hostT.start(); await guestT.start();
+  await until(() => guestT.getState().vpn === 'on');
+  guest.emitJoinPrompt({ ssid: 'DIRECT-x', phase: 'show' });
+  assert.equal(guestT.getState().joinPrompt, true);
+  guestT.stop();
+  assert.equal(guestT.getState().joinPrompt, false);
+  hostT.stop();
+});
