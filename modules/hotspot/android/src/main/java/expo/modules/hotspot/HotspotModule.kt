@@ -19,6 +19,7 @@ import android.os.Build
 import android.os.Handler
 import android.util.Log
 import android.os.Looper
+import android.os.SystemClock
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -39,6 +40,10 @@ private const val JOIN_TIMEOUT_MS = 180_000L
 private const val GROUP_READY_MS = 15_000L
 /** group ready のあと、ビーコンが出始めるまで待ってから子機が join を始める時間(試験で比べるため 1 か所。0 で待たない) */
 private const val JOIN_START_DELAY_MS = 2_500L
+/** setBand 付きの要求がこの時間より早く onUnavailable になったら「setBand を OS に即拒否された」とみなす */
+private const val BAND_REJECT_FAST_MS = 5_000L
+/** 子機の参加で setBand(2.4GHz) を付けて要求するか。既定 false=最初から setBand なし(以前つながっていた状態)。true=付きで要求し、5 秒未満で拒否されたら setBand なしで再要求 */
+private const val JOIN_USE_BAND = false
 
 class HotspotModule : Module() {
   private var reservation: WifiManager.LocalOnlyHotspotReservation? = null
@@ -682,14 +687,22 @@ class HotspotModule : Module() {
   }
 
   /** 参加を 1 回試す。JOIN_TIMEOUT_MS で見つからなければ要求を取り下げ(ダイアログを残さない)、1 回だけやり直す */
-  private fun startJoin(ssid: String, pass: String, attempt: Int) {
+  private fun startJoin(ssid: String, pass: String, attempt: Int, bandFallback: Boolean = false) {
+    joinTimeout?.let { mainHandler.removeCallbacks(it) } // setBand 拒否からの再要求で、前の時間切れを残さない
+    joinTimeout = null
     val gen = ++joinGen
     val sb = WifiNetworkSpecifier.Builder().setSsid(ssid).setWpa2Passphrase(pass)
     // 親機の GO は 2.4GHz 固定。子機の探索も 2.4GHz に絞り、5GHz/DFS のオフチャンネルスキャンに時間を取られないようにする(API 33+。非対応・失敗時は指定なし)
-    if (Build.VERSION.SDK_INT >= 33) {
-      try { sb.setBand(android.net.wifi.ScanResult.WIFI_BAND_24_GHZ); DhLog.i(TAG, "joinWifi scan band=2.4GHz only") }
+    // OS が setBand 付きを即拒否する端末では、1 回だけ setBand なしでやり直し、成功した方式をプロセス内で覚える
+    var usedBand = false
+    if (bandFallback) DhLog.i(TAG, "joinWifi scan band=指定なし(setBand 拒否→なしで再要求)")
+    else if (JOIN_USE_BAND && Build.VERSION.SDK_INT >= 33 && joinBandPref != false) {
+      try { sb.setBand(android.net.wifi.ScanResult.WIFI_BAND_24_GHZ); usedBand = true; DhLog.i(TAG, "joinWifi scan band=2.4GHz only") }
       catch (e: Throwable) { DhLog.w(TAG, "joinWifi setBand(2.4GHz) failed $e -> 帯域指定なし") }
-    } else DhLog.i(TAG, "joinWifi scan band=指定なし(API<33 は WifiNetworkSpecifier.setBand 不可)")
+    } else if (!JOIN_USE_BAND) DhLog.i(TAG, "joinWifi scan band=指定なし(JOIN_USE_BAND=false)")
+    else if (Build.VERSION.SDK_INT >= 33) DhLog.i(TAG, "joinWifi scan band=指定なし(この端末は setBand 拒否と覚えている)")
+    else DhLog.i(TAG, "joinWifi scan band=指定なし(API<33 は WifiNetworkSpecifier.setBand 不可)")
+    val startedAt = SystemClock.elapsedRealtime()
     val spec = sb.build()
     val req = NetworkRequest.Builder()
       .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
@@ -706,14 +719,23 @@ class HotspotModule : Module() {
         if (gen != joinGen) return
         val gw = gatewayOf(lp) ?: return
         joinedGw = gw
-        DhLog.i(TAG, "join ok ssid=$ssid gw=$gw attempt=$attempt")
+        joinBandPref = usedBand // 成功した方式を以降の最初の要求で使う
+        DhLog.i(TAG, "join ok ssid=$ssid gw=$gw attempt=$attempt setBand=$usedBand")
         finishJoin("ok", null, gw)
       }
       override fun onUnavailable() {
         if (gen != joinGen) return
+        val elapsed = SystemClock.elapsedRealtime() - startedAt
+        if (usedBand && elapsed < BAND_REJECT_FAST_MS && joinPending != null) {
+          DhLog.w(TAG, "join unavailable ssid=$ssid attempt=$attempt after ${elapsed}ms: setBand 拒否→なしで再要求")
+          runCatching { cm.unregisterNetworkCallback(this) }
+          if (netCb === this) netCb = null
+          startJoin(ssid, pass, attempt + 1, bandFallback = true)
+          return
+        }
         val sc = logScan(ssid, "unavailable", false)
         val reason = when (sc?.expected) { false -> "not-found"; true -> "rejected"; null -> "unavailable" }
-        DhLog.w(TAG, "join unavailable ssid=$ssid attempt=$attempt reason=$reason (onUnavailable = 断られたか、見つからない)")
+        DhLog.w(TAG, "join unavailable ssid=$ssid attempt=$attempt reason=$reason after ${elapsed}ms (onUnavailable = 断られたか、見つからない)")
         finishJoin("declined", joinFailure(reason, sc))
       }
       override fun onLost(n: Network) {
@@ -722,8 +744,8 @@ class HotspotModule : Module() {
       }
     }
     netCb = cb
-    DhLog.i(TAG, "joinWifi requestNetwork ssid=$ssid (1 回だけ) timeout=${JOIN_TIMEOUT_MS}ms")
-    sendEvent("onJoinPrompt", mapOf("ssid" to ssid, "phase" to "show", "timeoutMs" to JOIN_TIMEOUT_MS))
+    DhLog.i(TAG, "joinWifi requestNetwork ssid=$ssid attempt=$attempt setBand=$usedBand timeout=${JOIN_TIMEOUT_MS}ms")
+    if (!bandFallback) sendEvent("onJoinPrompt", mapOf("ssid" to ssid, "phase" to "show", "timeoutMs" to JOIN_TIMEOUT_MS)) // 再要求では show を二重に出さない
     cm.requestNetwork(req, cb)
     joinTimeout = Runnable {
       if (gen != joinGen) return@Runnable
@@ -789,5 +811,7 @@ class HotspotModule : Module() {
 
   companion object {
     @Volatile private var activeEcho: ServerSocket? = null
+    /** 子機の参加で setBand(2.4GHz) 付きが通るか。null=未確認 / true=付きで成功 / false=なしで成功(プロセス内で記憶) */
+    @Volatile private var joinBandPref: Boolean? = null
   }
 }
