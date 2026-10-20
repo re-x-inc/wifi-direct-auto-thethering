@@ -6,6 +6,7 @@ import Hotspot from './modules/hotspot';
 import KeepAlive from './modules/keep-alive';
 import VpnTunnel from './modules/vpn-tunnel';
 import { nearbyApi } from './src/nearbyApi';
+import { directCreds } from './src/pairing/directCreds';
 import { Confirm, Found, PairingSession } from './src/pairing/pairing';
 import { secureKv } from './src/pairing/secureKv';
 import { getIdentity, PairStore } from './src/pairing/store';
@@ -205,13 +206,10 @@ export default function App() {
       }
       if (!cred) return;
     } else {
-      // SSID・パスフレーズ・チャンネル(2.4GHz ch6)を毎回同じにする(承認の記憶が効く)。ペアの共有コードから導く
-      const secret = pairRef.current?.secret;
-      if (!secret) { push('ペアがありません'); return; }
-      const h1 = nearbyApi.hmac(secret, 'direct-ssid');
-      const h2 = nearbyApi.hmac(secret, 'direct-pass');
-      const name = 'DIRECT-dh-' + h1.slice(0, 4);
-      const pass = h2.slice(0, 12);
+      // SSID・パスフレーズ・チャンネル(2.4GHz ch6)をペアごとに固定する(保存済みがあればそれを使う。承認の記憶が効く)
+      const pair = pairRef.current;
+      if (!pair || !identity) { push('ペアがありません'); return; }
+      const { ssid: name, pass } = await directCreds({ hmac: nearbyApi.hmac, kv: secureKv, selfId: identity.id, peerId: pair.peerId, secret: pair.secret });
       const t0 = Date.now();
       try {
         cred = await Hotspot.startDirect(name, pass, 2437);

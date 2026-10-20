@@ -23,7 +23,8 @@ private const val SERVICE_ID = "info.rex.tether.link"
 private const val RETRY_MAX = 2
 private const val REDISCOVER_MAX = 2
 private const val REDISCOVER_TOTAL_MS = 30_000L
-// ペア保存後の通常接続: つながるまでの間の省電力の扱い(BLE だけだと 8007 で繋がらないため、はじめは lowPower=false)
+// ペア保存後の通常接続: つながっていない間だけ省電力にする(BLE だけだと 8007 で繋がらないため、はじめは lowPower=false)。
+// つながっている間は常に lowPower=false。切れたら、また下の時間割を頭から数える
 private const val LINK_FULL_POWER_MS = 120_000L // つながらないまま続いたら省電力に落とす
 private const val LINK_CYCLE_MS = 60_000L // 以降はこの間隔で
 private const val LINK_BURST_MS = 20_000L // この長さだけ lowPower=false で試す
@@ -57,11 +58,16 @@ class NearbyLinkModule : Module() {
       ))
     }
     override fun onConnectionResult(endpointId: String, result: ConnectionResolution) {
-      if (result.status.isSuccess) linkSince = null // つながったので、次に切れたらはじめから(lowPower=false)
-      if (result.status.isSuccess) sendEvent("onConnected", mapOf("endpointId" to endpointId))
-      else sendEvent("onFailed", mapOf("endpointId" to endpointId, "code" to result.status.statusCode))
+      if (result.status.isSuccess) {
+        linkUp(endpointId)
+        sendEvent("onConnected", mapOf("endpointId" to endpointId))
+      } else {
+        linkDown(endpointId)
+        sendEvent("onFailed", mapOf("endpointId" to endpointId, "code" to result.status.statusCode))
+      }
     }
     override fun onDisconnected(endpointId: String) {
+      linkDown(endpointId)
       sendEvent("onDisconnected", mapOf("endpointId" to endpointId))
     }
   }
@@ -77,7 +83,8 @@ class NearbyLinkModule : Module() {
   }
 
   // ---- 通常接続(ペア保存後)の省電力制御 ----
-  private var linkSince: Long? = null // つながっていない状態が始まった時刻。onConnected で消す
+  private var linkSince: Long? = null // つながっていない状態が始まった時刻(つながっている間は null)
+  private val connected = java.util.concurrent.ConcurrentHashMap.newKeySet<String>() // いまつながっている相手
   private var lastActivity = 0L
   private var advName: String? = null
   private var discovering = false
@@ -95,9 +102,27 @@ class NearbyLinkModule : Module() {
     }
   }
 
-  /** いまの広告・探索を lowPower にするか。ペアリング中は常に false。通常接続は、つながるまでの経過時間で決める */
+  /** つながった。つながっている間は lowPower=false のまま(省電力に落とさない) */
+  private fun linkUp(endpointId: String) {
+    connected.add(endpointId)
+    linkSince = null
+    android.util.Log.i("DH-NEARBY", "link up connected=${connected.size} lowPower=false (つながっている間は省電力にしない)")
+  }
+
+  /** つながりが切れた/つながれなかった。誰ともつながっていなければ、ここから「つながっていない時間」を数え直す */
+  private fun linkDown(endpointId: String) {
+    connected.remove(endpointId)
+    if (connected.isEmpty() && !pairing) {
+      val now = android.os.SystemClock.elapsedRealtime()
+      linkSince = now
+      lastActivity = now
+      android.util.Log.i("DH-NEARBY", "link down connected=0 -> full power ${LINK_FULL_POWER_MS / 1000}s, then power-save cycle")
+    }
+  }
+
+  /** いまの広告・探索を lowPower にするか。ペアリング中とつながっている間は常に false。通常接続は、つながっていない経過時間で決める */
   private fun lowNow(): Boolean {
-    if (pairing) return false
+    if (pairing || connected.isNotEmpty()) return false
     val since = linkSince ?: return false
     val el = android.os.SystemClock.elapsedRealtime() - since
     if (el < LINK_FULL_POWER_MS) return false
@@ -105,6 +130,7 @@ class NearbyLinkModule : Module() {
   }
 
   private fun touchLink() {
+    if (connected.isNotEmpty()) return // つながっている間は数えない
     val now = android.os.SystemClock.elapsedRealtime()
     if (linkSince == null || now - lastActivity > LINK_STALE_MS) linkSince = now
     lastActivity = now
@@ -265,9 +291,13 @@ class NearbyLinkModule : Module() {
     Function("send") { endpointId: String, text: String ->
       client.sendPayload(endpointId, Payload.fromBytes(text.toByteArray(Charsets.UTF_8)))
     }
-    Function("disconnect") { endpointId: String -> client.disconnectFromEndpoint(endpointId) }
+    Function("disconnect") { endpointId: String ->
+      client.disconnectFromEndpoint(endpointId)
+      linkDown(endpointId) // 自分から切ったときは onDisconnected が来ないので、ここで「つながっていない」に戻す
+    }
     Function("stop") {
       pairing = false
+      connected.clear()
       advName = null
       discovering = false
       curLow = null
