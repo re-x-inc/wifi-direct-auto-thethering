@@ -10,6 +10,12 @@ const KEY = (peerId: string) => `direct.v1.${peerId}`;
 const SSID_RE = /^DIRECT-[A-Za-z0-9]{2}-[\x20-\x7e]{1,22}$/;
 const SSID_SALT = 'tether-direct-ssid-v1';
 
+/** ペア解除時に、その相手の Wi-Fi Direct 名・合言葉を消す(再ペアリングで古い値が残らないように) */
+export async function removeDirectCreds(kv: KeyValue, peerId: string): Promise<void> {
+  if (kv.remove) await kv.remove(KEY(peerId));
+  else await kv.set(KEY(peerId), ''); // 空は「保存なし」と同じ扱い(directCreds は raw が空なら作り直す)
+}
+
 export function validDirectCreds(c: Partial<DirectCreds> | null | undefined): c is DirectCreds {
   return !!c && typeof c.ssid === 'string' && typeof c.pass === 'string' && SSID_RE.test(c.ssid) && c.ssid.length <= 32 && c.pass.length >= 8 && c.pass.length <= 63;
 }

@@ -155,10 +155,14 @@ test('ペアリング → そのまま start できる(動いていたリンク�
   assert.equal((await b.pairs())[0].role, 'host');
 });
 
-import { pickDirectFrequencies } from './tether';
-test('Direct のチャンネル候補', () => {
-  assert.deepEqual(pickDirectFrequencies(0), [null]);
-  assert.deepEqual(pickDirectFrequencies(2462), [null, 2462]);
-  assert.deepEqual(pickDirectFrequencies(5180), [null, 5180]);
-  assert.deepEqual(pickDirectFrequencies(5300), [null]);
+import { pickDirectPlans } from './tether';
+const summ = (sta: number) => pickDirectPlans(sta).map((p) => `${p.band}/${p.freq ?? 'auto'}`);
+test('Direct の帯域・チャンネル候補(2.4GHz 固定。STA が 2.4GHz のときだけ追従)', () => {
+  assert.deepEqual(summ(0), ['2.4/2412', '2.4/2437', '2.4/2462', '2.4/auto']);
+  assert.deepEqual(summ(2462), ['2.4/2462', '2.4/2412', '2.4/2437', '2.4/auto']);
+  assert.deepEqual(summ(2447), ['2.4/2447', '2.4/2412', '2.4/2437', '2.4/2462', '2.4/auto']);
+  for (const sta of [5180, 5580, 5745, 5955]) {
+    assert.deepEqual(summ(sta), ['2.4/2412', '2.4/2437', '2.4/2462', '2.4/auto']); // 5GHz・DFS には合わせない
+    assert.ok(pickDirectPlans(sta).every((p) => p.band === '2.4'));
+  }
 });

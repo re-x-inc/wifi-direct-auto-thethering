@@ -232,3 +232,24 @@ test('ペア解除で、その相手の能力キャッシュと履歴も消え�
   assert.ok(!(await host.platform.kv.get('tether.history.v1'))?.includes('DH-GUEST'));
   guestT.stop();
 });
+
+test('ペア解除で、その相手の Wi-Fi Direct 名・合言葉(direct.v1.<peerId>)も消える', async () => {
+  const { hostT, guestT, host } = await setup();
+  await hostT.start(); await guestT.start();
+  await until(() => hostT.getState().share === 'on');
+  assert.ok(await host.platform.kv.get('direct.v1.DH-GUEST'));
+  await hostT.removePair('DH-GUEST');
+  assert.ok(!(await host.platform.kv.get('direct.v1.DH-GUEST')));
+  guestT.stop(); hostT.stop();
+});
+
+test('ネイティブのログ(onNativeLog)が tether.onLog に流れる', async () => {
+  const { hostT, host } = await setup();
+  let push: (tag: string, line: string) => void = () => {};
+  (host.platform as any).onNativeLog = (cb: any) => { push = cb; return () => {}; };
+  const t = new (hostT.constructor as any)(host.platform, {});
+  const lines: string[] = [];
+  t.onLog((l: string) => lines.push(l));
+  push('DH-P2P', 'i group ready freq=2412');
+  assert.deepEqual(lines, ['[DH-P2P] i group ready freq=2412']);
+});

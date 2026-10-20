@@ -6,7 +6,7 @@ import { HotspotPort, TetherPlatform, VpnPort } from './types';
 
 export const memKv = (): KeyValue => {
   const m = new Map<string, string>();
-  return { get: async (k) => m.get(k) ?? null, set: async (k, v) => void m.set(k, v) };
+  return { get: async (k) => m.get(k) ?? null, set: async (k, v) => void m.set(k, v), remove: async (k) => void m.delete(k) };
 };
 
 let n = 0;
