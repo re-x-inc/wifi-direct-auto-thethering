@@ -484,6 +484,7 @@ export class Tether {
     const h = this.p.hotspot;
     const wasHost = this.state.role === 'host';
     if (wasHost || this.state.share !== 'off') {
+      this.log(`共有を停止(エコー・SOCKS・Direct を閉じる share=${this.state.share})`);
       try { h.stopSocks(); } catch {}
       try { h.stopEcho(); } catch {}
       try { h.stopHotspot(); } catch {}
@@ -750,7 +751,7 @@ export class Tether {
     await this.p.sleep(1500);
     if (gen !== this.gen) return null;
     // 子機は承認済みの SSID が見えた瞬間に自動参加して到達確認をする。待たせて拒否されないよう、ポートを先に開けておく
-    try { h.startEcho(ECHO_PORT); } catch (e: any) { this.log('エコー起動失敗: ' + (e?.message ?? e)); }
+    try { h.startEcho(ECHO_PORT); this.log(`エコー起動 (port ${ECHO_PORT})`); } catch (e: any) { this.log('エコー起動失敗: ' + (e?.message ?? e)); }
     const socks: Socks = { port: SOCKS_PORT, user: 'u' + this.p.randomHex(4), pass: this.p.randomHex(12) };
     try {
       const { network } = await h.startSocks(socks.port, socks.user, socks.pass);
@@ -785,6 +786,25 @@ export class Tether {
     return fail(`回線の共有を始められませんでした(${order.map((m) => (m === 'WifiDirect' ? 'Wi-Fi Direct' : 'LocalOnlyHotspot')).join('・')} とも失敗)`);
   }
 
+  /**
+   * グループ作成の await 中に stop() された(ホームのスイッチ OFF など)か。
+   * その場合 stop() の stopDirect は「まだ無いグループ」に空振りし、後からグループだけが残る
+   * (エコー・SOCKS は stop() で閉じ済み = 子機は自動参加できても 9000 が ECONNREFUSED)。
+   * 新しい start() が進んでいる(started / starting)ときは、そちらの buildShare が作り直すので触らない。
+   */
+  private abandoned(gen: number): boolean {
+    return gen !== this.gen && !this.state.started && !this.starting;
+  }
+
+  private async dropOrphan(what: string): Promise<void> {
+    this.log(`${what} を作る間に停止された: 残ったグループを閉じる`);
+    const h = this.p.hotspot;
+    try { h.stopSocks(); } catch {}
+    try { h.stopEcho(); } catch {}
+    try { h.stopHotspot(); } catch {}
+    await h.stopDirect().catch(() => {});
+  }
+
   /** 主: Wi-Fi Direct(SSID・パスフレーズを固定(ch は動的)。ペアの共有コードから導く → OS が承認を覚える) */
   private async tryDirect(gen: number, peerId: string, secret: string, socks: Socks): Promise<WifiMsg | null> {
     const h = this.p.hotspot;
@@ -802,6 +822,7 @@ export class Tether {
         const t0 = this.p.now();
         const cred = await h.startDirect(name, pass, freq, plan.band, plan.reason);
         this.log(`Wi-Fi Direct 成功(${this.p.now() - t0}ms, ${describePlan(plan)})`);
+        if (this.abandoned(gen)) { await this.dropOrphan('Wi-Fi Direct'); return null; }
         void this.record('WifiDirect', 'create', true);
         // 親機が Wi-Fi に接続したまま Direct を作れた = STA+P2P の同時動作を観測
         if (staFreq > 0) void this.observe('staP2pConcurrent', true);
@@ -823,6 +844,7 @@ export class Tether {
       try {
         const cred = await h.startHotspot();
         this.log(`LocalOnlyHotspot 成功(${i}回目)`);
+        if (this.abandoned(gen)) { await this.dropOrphan('LocalOnlyHotspot'); return null; }
         void this.record('LocalOnlyHotspot', 'create', true);
         return { kind: 'tether.wifi', method: 'LocalOnlyHotspot', ssid: cred.ssid, pass: cred.passphrase, port: ECHO_PORT, socks };
       } catch (e: any) {

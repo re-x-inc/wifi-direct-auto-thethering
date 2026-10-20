@@ -14,7 +14,7 @@ export const testRandomHex = (bytes: number) =>
   Array.from({ length: bytes }, () => ((n++ * 37 + 11) % 256).toString(16).padStart(2, '0')).join('');
 
 /** 端末の部品の偽物。呼び出しを calls に記録する。 */
-export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; joinError?: string; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[]; backgroundLocation?: boolean } = {}) {
+export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; directDelayMs?: number; joinError?: string; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[]; backgroundLocation?: boolean } = {}) {
   const calls: string[] = [];
   const files: Record<string, string> = {};
   const wifiLost = new Set<() => void>();
@@ -25,6 +25,8 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     stopHotspot: () => void calls.push('stopHotspot'),
     startDirect: async (name, pass) => {
       calls.push('startDirect');
+      if (o.directDelayMs) await new Promise((r) => setTimeout(r, o.directDelayMs));
+      calls.push('directCreated');
       if (o.directFails) throw new Error('p2p busy');
       return { ssid: name ?? 'DIRECT-x', passphrase: pass ?? 'p' };
     },
