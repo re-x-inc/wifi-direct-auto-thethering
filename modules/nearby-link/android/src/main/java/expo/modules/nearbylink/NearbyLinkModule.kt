@@ -20,6 +20,7 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 private const val SERVICE_ID = "info.rex.tether.link"
+private const val RETRY_MAX = 2
 
 /**
  * Nearby Connections の薄いラッパー。受け入れ可否・認証の方針は JS 側で決める
@@ -56,6 +57,9 @@ class NearbyLinkModule : Module() {
     }
   }
 
+  /** ペアリング中だけ true。広告・探索の省電力を外す */
+  @Volatile private var pairing = false
+
   /** 開始系の失敗を握りつぶさず、コード付きでログと JS に伝える */
   private fun report(op: String, e: Exception) {
     val code = (e as? com.google.android.gms.common.api.ApiException)?.statusCode ?: -1
@@ -72,13 +76,36 @@ class NearbyLinkModule : Module() {
     }
   }
 
+  /**
+   * 接続の瞬間だけ省電力を外す(広告・探索は省電力のまま)。lowPower=false なら BLE 以外(Bluetooth Classic / Wi-Fi)も使える。
+   * 8007 STATUS_RADIO_ERROR は一時的なことが多いので、間をおいて最大 RETRY_MAX 回まで再試行する。
+   * 8003 ALREADY_CONNECTED は残骸の接続を切って繋ぎ直す。JS への失敗通知(onError)は従来どおり各回で出す。
+   */
+  private fun requestWithRetry(endpointId: String, name: String, attempt: Int) {
+    val o = ConnectionOptions.Builder().setLowPower(false).build()
+    client.requestConnection(name, endpointId, lifecycle, o).addOnFailureListener { e ->
+      val code = (e as? com.google.android.gms.common.api.ApiException)?.statusCode ?: -1
+      android.util.Log.w("DH-NEARBY", "requestConnect attempt=${attempt + 1}/${RETRY_MAX + 1} code=$code")
+      report(if (attempt == 0) "requestConnect" else "requestConnect(retry$attempt)", e)
+      val retry = (code == 8003 || code == 8007) && attempt < RETRY_MAX
+      if (!retry) return@addOnFailureListener
+      if (code == 8003) client.disconnectFromEndpoint(endpointId)
+      android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+        requestWithRetry(endpointId, name, attempt + 1)
+      }, if (code == 8003) 700L else 1500L)
+    }
+  }
+
   override fun definition() = ModuleDefinition {
     Name("NearbyLink")
     Events("onFound", "onLost", "onInitiated", "onConnected", "onFailed", "onDisconnected", "onMessage", "onError")
 
-    // 1対1。制御用の小さなデータだけなので省電力(Bluetooth のみ)に固定し、Wi-Fi 共有(ホットスポット/Wi-Fi Direct)と無線を取り合わない
+    // 1対1。待っている間(広告・探索)は省電力(BLE のみ)。接続要求だけ省電力を外す(requestWithRetry)
     Function("advertise") { name: String ->
-      val o = AdvertisingOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(true).build()
+      // ペアリング中(名前が P| で始まる)だけ省電力を外す。BLE だけだと 8007 で繋がらないことがあり、Bluetooth Classic / Wi-Fi も使えるようにする。終わったら stop() か通常の名前で省電力に戻る
+      pairing = name.startsWith("P|")
+      android.util.Log.i("DH-NEARBY", "advertise lowPower=${!pairing} name=$name")
+      val o = AdvertisingOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(!pairing).build()
       // 停止→再開始で前回の広告が残っていると ALREADY_ADVERTISING になるため、先に止める(同じ client への呼び出しは順序どおり処理される)
       // 前回の接続の残骸(GMS が ALREADY_CONNECTED と思い込む)を一掃してから始める
       client.stopAllEndpoints()
@@ -86,25 +113,13 @@ class NearbyLinkModule : Module() {
       client.startAdvertising(name, SERVICE_ID, lifecycle, o).addOnFailureListener { e -> report("advertise", e) }
     }
     Function("discover") {
-      val o = DiscoveryOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(true).build()
+      android.util.Log.i("DH-NEARBY", "discover lowPower=${!pairing}")
+      val o = DiscoveryOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(!pairing).build()
       client.stopAllEndpoints()
       client.stopDiscovery()
       client.startDiscovery(SERVICE_ID, discovery, o).addOnFailureListener { e -> report("discover", e) }
     }
-    Function("requestConnect") { endpointId: String, name: String ->
-      client.requestConnection(name, endpointId, lifecycle, ConnectionOptions.Builder().setLowPower(true).build())
-        .addOnFailureListener { e ->
-          report("requestConnect", e)
-          // 8003 ALREADY_CONNECTED_TO_ENDPOINT: 残骸の接続を切ってから、一度だけ繋ぎ直す
-          if ((e as? com.google.android.gms.common.api.ApiException)?.statusCode == 8003) {
-            client.disconnectFromEndpoint(endpointId)
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-              client.requestConnection(name, endpointId, lifecycle, ConnectionOptions.Builder().setLowPower(true).build())
-                .addOnFailureListener { e2 -> report("requestConnect(retry)", e2) }
-            }, 700)
-          }
-        }
-    }
+    Function("requestConnect") { endpointId: String, name: String -> requestWithRetry(endpointId, name, 0) }
     Function("accept") { endpointId: String -> client.acceptConnection(endpointId, payloads) }
     Function("reject") { endpointId: String -> client.rejectConnection(endpointId) }
     Function("send") { endpointId: String, text: String ->
@@ -112,6 +127,7 @@ class NearbyLinkModule : Module() {
     }
     Function("disconnect") { endpointId: String -> client.disconnectFromEndpoint(endpointId) }
     Function("stop") {
+      pairing = false
       client.stopAdvertising(); client.stopDiscovery(); client.stopAllEndpoints()
     }
 
