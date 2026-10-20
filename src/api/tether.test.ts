@@ -166,3 +166,33 @@ test('Direct の帯域・チャンネル候補(2.4GHz 固定。STA が 2.4GHz �
     assert.ok(pickDirectPlans(sta).every((p) => p.band === '2.4'));
   }
 });
+
+test('子機が unpair すると親機に解除通知が届き、親機も該当ペアと direct.v1 を消す', async () => {
+  const { hostT, guestT, host, guest } = await setup();
+  await host.platform.kv.set('direct.v1.DH-GUEST', 'x');
+  await guest.platform.kv.set('direct.v1.DH-HOST', 'x');
+  await hostT.start(); await guestT.start();
+  await until(() => guestT.getState().link === 'connected' && hostT.getState().link === 'connected');
+  await guestT.unpair('DH-HOST');
+  await until(() => hostT.getState().started === false);
+  assert.deepEqual(await hostT.pairs(), []);
+  assert.deepEqual(await guestT.pairs(), []);
+  assert.notEqual(await host.platform.kv.get('direct.v1.DH-GUEST'), 'x');
+  assert.notEqual(await guest.platform.kv.get('direct.v1.DH-HOST'), 'x');
+});
+
+test('未接続で unpair しても、子機側だけ消えてエラーにならない', async () => {
+  const { guestT } = await setup();
+  await guestT.unpair('DH-HOST');
+  assert.deepEqual(await guestT.pairs(), []);
+});
+
+test('接続すると pairs() の lastSeenAt が更新される', async () => {
+  const { hostT, guestT } = await setup();
+  assert.equal((await hostT.pairs())[0].lastSeenAt, undefined);
+  await hostT.start(); await guestT.start();
+  await until(() => hostT.getState().link === 'connected');
+  await wait(20);
+  assert.equal(typeof (await hostT.pairs())[0].lastSeenAt, 'number');
+  hostT.stop(); guestT.stop();
+});

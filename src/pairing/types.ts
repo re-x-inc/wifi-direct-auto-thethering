@@ -6,6 +6,8 @@ export interface Pair {
   createdAt: number;
   /** ペアリングで利用者が選んだ、この端末の役割。host=親機(回線を共有) / guest=子機。古いペアには無い */
   role?: 'host' | 'guest';
+  /** 最後に接続した/メッセージを受けた時刻(ms)。古いデータには無い。親機の UI が「しばらく接続がない」を出すのに使う */
+  lastSeenAt?: number;
 }
 
 /** 端末の永続的な識別。id は広告名・接続の照合に使う(秘密ではない) */
