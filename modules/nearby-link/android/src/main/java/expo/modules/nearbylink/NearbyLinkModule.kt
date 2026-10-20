@@ -132,6 +132,36 @@ class NearbyLinkModule : Module() {
       "connected=${connected.size} inFlight=${inFlight.size} pairing=$pairing ${wifiState()}")
   }
 
+  /**
+   * 実機確認用: アップグレード時に現れる P2P の状態を DH-NEARBY に残す(グループの ssid・GO IP・interface、p2p らしいネットワークの interface/アドレス/種類)。
+   * 副作用なし(グループは作らない・消さない)。権限が無いなどで取れない項目は ? になる
+   */
+  @Suppress("DEPRECATION")
+  private fun dumpP2p(why: String) {
+    val c = appContext.reactContext ?: return
+    try {
+      val cm = c.getSystemService(android.net.ConnectivityManager::class.java)
+      val nets = cm.allNetworks.mapNotNull { n ->
+        val lp = cm.getLinkProperties(n) ?: return@mapNotNull null
+        val cap = cm.getNetworkCapabilities(n)
+        val tr = listOf(android.net.NetworkCapabilities.TRANSPORT_WIFI to "WIFI", android.net.NetworkCapabilities.TRANSPORT_WIFI_AWARE to "AWARE", android.net.NetworkCapabilities.TRANSPORT_CELLULAR to "CELL", android.net.NetworkCapabilities.TRANSPORT_BLUETOOTH to "BT")
+          .filter { cap?.hasTransport(it.first) == true }.joinToString("+") { it.second }
+        "${lp.interfaceName}[$tr inet=${cap?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)} ${lp.linkAddresses.joinToString(",") { it.address.hostAddress ?: "?" }}]"
+      }
+      val m = c.getSystemService(android.content.Context.WIFI_P2P_SERVICE) as android.net.wifi.p2p.WifiP2pManager
+      val ch = m.initialize(c, android.os.Looper.getMainLooper(), null)
+      m.requestConnectionInfo(ch) { info ->
+        m.requestGroupInfo(ch) { g ->
+          DhLog.i("DH-NEARBY", "p2p@upgrade why=$why groupFormed=${info?.groupFormed} isGO=${info?.isGroupOwner} goAddr=${info?.groupOwnerAddress?.hostAddress} " +
+            "group.ssid=${g?.networkName} group.iface=${g?.`interface`} group.isGO=${g?.isGroupOwner} clients=${g?.clientList?.size} nets=$nets")
+          runCatching { if (android.os.Build.VERSION.SDK_INT >= 27) ch.close() }
+        }
+      }
+    } catch (e: Exception) {
+      DhLog.w("DH-NEARBY", "p2p@upgrade why=$why dump failed $e")
+    }
+  }
+
   /** Wi-Fi との共存を見る手がかり。取れなければ空 */
   private fun wifiState(): String = try {
     val wm = appContext.reactContext?.applicationContext?.getSystemService(android.content.Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
@@ -165,7 +195,9 @@ class NearbyLinkModule : Module() {
     override fun onBandwidthChanged(endpointId: String, info: com.google.android.gms.nearby.connection.BandwidthInfo) {
       // quality: 0=UNKNOWN 1=LOW(BT/BLE) 2=MEDIUM 3=HIGH(Wi-Fi 系)。medium 名そのものは API に無い
       val q = when (info.quality) { 1 -> "LOW(BT/BLE)"; 2 -> "MEDIUM"; 3 -> "HIGH(Wi-Fi系)"; else -> "UNKNOWN" }
-      DhLog.i("DH-NEARBY", "bandwidth changed ep=$endpointId quality=$q mediums=$NEARBY_MEDIUMS")
+      val prevQ = when (diags[endpointId]?.quality) { 1 -> "LOW(BT/BLE)"; 2 -> "MEDIUM"; 3 -> "HIGH(Wi-Fi系)"; 0 -> "UNKNOWN"; else -> "none" }
+      DhLog.i("DH-NEARBY", "bandwidth changed ep=$endpointId quality=$prevQ->$q mediums=$NEARBY_MEDIUMS")
+      dumpP2p("bandwidth $prevQ->$q ep=$endpointId")
       diags[endpointId]?.quality = info.quality
       markCb(endpointId, "onBandwidthChanged($q)")
       sendEvent("onBandwidth", mapOf("endpointId" to endpointId, "quality" to info.quality))

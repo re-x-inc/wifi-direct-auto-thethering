@@ -3,6 +3,8 @@ import { NativeModule, requireNativeModule } from 'expo';
 type Events = {
   /** ネイティブのログ(DH-P2P など)。SSID・BSSID・端末名は伏せ済み。line は "i|w 本文" */
   log(e: { tag: string; line: string }): void;
+  /** adopt-nearby: 親機が観測した P2P グループの現況(present=false は消滅) */
+  onP2pGroup(e: { present: boolean; group: { ssid: string; pass: string | null; isGO: boolean; host: string | null; iface: string | null; clients: number } | null }): void;
   onHotspotStopped(e: Record<string, never>): void;
   onWifiLost(e: Record<string, never>): void;
   /** 子機の Wi-Fi 参加。phase 'show' = 端末の許可画面が出る(「接続」を押してもらう)。ok/declined/timeout/cancelled = 終わり */
@@ -40,6 +42,11 @@ declare class HotspotModule extends NativeModule<Events> {
   /** name/pass/freq を渡すと固定(例: 'DIRECT-dh-xxxx', 12文字, 2437。null はシステム任せ)。省略はランダム */
   startDirect(name?: string | null, pass?: string | null, freq?: number | null, bandHint?: string | null, why?: string | null): Promise<{ ssid: string; passphrase: string }>;
   stopDirect(): Promise<void>;
+  /** adopt-nearby: P2P グループの変化の購読を始める(始めた直後に現況を 1 回 onP2pGroup で通知)。止めるのは stopP2pObserve */
+  startP2pObserve(): void;
+  stopP2pObserve(): void;
+  /** adopt-nearby 子機: 参加済みの P2P ネットワークを探して固定する。GO の IP はまず自身の WifiP2pManager、だめなら fallbackHost */
+  adoptP2pNetwork(fallbackHost: string | null, timeoutMs: number): Promise<{ gateway: string; source: 'p2p-info' | 'nearby-msg'; iface: string | null; localAddr: string | null; groupFormed: boolean; netKind: string }>;
   startSocks(port: number, user: string, pass: string): Promise<{ network: 'cellular' | 'default' }>;
   stopSocks(): void;
   socksSelfTest(port: number, user: string, pass: string): Promise<{ ok: boolean; line?: string; error?: string; udp?: boolean }>;

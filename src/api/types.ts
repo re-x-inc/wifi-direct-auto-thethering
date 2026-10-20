@@ -77,6 +77,17 @@ export interface MessageMeta {
 
 // ---- 端末側の部品(テストでは偽物に差し替える) ----
 
+/** Wi-Fi Direct グループの現況(親機が観測)。pass は GO のときだけ取れる */
+export interface P2pGroup {
+  ssid: string;
+  pass: string | null;
+  isGO: boolean;
+  /** 子機が接続すべき親機のアドレス(自分が GO なら GO の IP、通常 192.168.49.1。クライアントなら p2p インターフェースの自分の IP)。取れなければ null */
+  host: string | null;
+  iface: string | null;
+  clients: number;
+}
+
 export interface HotspotPort {
   startHotspot(): Promise<{ ssid: string; passphrase: string }>;
   stopHotspot(): void;
@@ -95,6 +106,18 @@ export interface HotspotPort {
   bindToJoined(): boolean;
   unbindProcess(): void;
   probe(host: string, port: number): Promise<{ ok: boolean; rttMs?: number; error?: string }>;
+  /**
+   * adopt-nearby 用。親機: いま存在する Wi-Fi Direct グループ(Nearby の帯域アップグレードが作ったものを含む)の変化を購読する。
+   * 購読直後に現在の状態を 1 回通知する。消えたら null。戻り値で購読解除
+   */
+  observeP2pGroup(cb: (g: P2pGroup | null) => void): () => void;
+  /**
+   * adopt-nearby 用。子機: Nearby のアップグレードで既に参加している P2P ネットワークを探して、このアプリの通信先に固定する
+   * (joinWifi の代わり)。親機のアドレスは、まず子機自身の WifiP2pManager(requestConnectionInfo の groupOwnerAddress)で問い合わせ、
+   * 取れないときだけ fallbackHost(親機が Nearby 制御メッセージで送ってきた値)を使う。source = どちらで得たか。
+   * timeoutMs 待ってもネットワークが見つからなければ reject
+   */
+  adoptP2pNetwork(fallbackHost: string | null, timeoutMs: number): Promise<{ gateway: string; source: 'p2p-info' | 'nearby-msg'; iface: string | null; localAddr: string | null; groupFormed: boolean; netKind: string }>;
   /** Wi-Fi 切断(参加先が消えた)の通知。戻り値で購読解除 */
   onWifiLost(cb: () => void): () => void;
   /**
@@ -152,6 +175,15 @@ export interface TetherConfig {
   capsWaitMs?: number;
   /** 方式判断の方針(台数の上限・既存接続の扱いなど) */
   planPolicy?: Partial<PlanPolicy>;
+  /**
+   * 親機: Wi-Fi Direct の使い方。
+   * 'own'(既定)= 固定グループ(DIRECT-dh-xxxx)を自分で作り、子機が joinWifi で参加する。
+   * 'adopt-nearby' = 固定グループは作らず、Nearby の帯域アップグレードが作った P2P グループ(いま存在するもの)にそのまま乗る。
+   *   親機はグループの host/iface を観測して子機へ送り、子機は参加済みの P2P ネットワークへ SOCKS/echo をつなぐ(joinWifi は使わない)。
+   */
+  directMode?: 'own' | 'adopt-nearby';
+  /** adopt-nearby: 子機が P2P ネットワークの出現を待つ最長時間(ms)。既定 30000 */
+  adoptWaitMs?: number;
 }
 
 /** 交換・判断の進行を知らせるイベント(onHandshake) */

@@ -28,6 +28,7 @@ export type {
   Identity,
   LinkPhase,
   MessageMeta,
+  P2pGroup,
   Pair,
   PairingResult,
   SendOptions,

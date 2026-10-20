@@ -11,6 +11,7 @@ import {
 } from './capability';
 import { buildDiagnosticReport, DiagnosticReport, reportFileName, reportToJson, summarizeReport } from './diagnostics';
 import { joinFailureDetail, joinFailureText, parseJoinFailure } from './joinFailure';
+import type { P2pGroup } from './types';
 import { GuestEntry, isCompatibleVersion, LinkMethod, LinkPlan, parsePlan, planLink } from './planner';
 import {
   HandshakeEvent,
@@ -30,7 +31,7 @@ import {
  */
 type Wire =
   | { kind: 'tether.app'; body: unknown }
-  | { kind: 'tether.wifi'; method: 'WifiDirect' | 'LocalOnlyHotspot'; ssid: string; pass: string; port: number; socks: Socks }
+  | { kind: 'tether.wifi'; method: 'WifiDirect' | 'LocalOnlyHotspot'; ssid: string; pass: string; port: number; socks: Socks; adopt?: Adopt }
   | { kind: 'tether.wifi-result'; ok: boolean; gateway?: string; rttMs?: number; error?: string }
   | { kind: 'tether.need-wifi' }
   // 子機が自分でペア解除するときの通知(best-effort)。親機は該当ペアを消す
@@ -45,6 +46,16 @@ interface Socks {
   port: number;
   user: string;
   pass: string;
+}
+
+/**
+ * directMode 'adopt-nearby' の印。付いていれば子機は joinWifi をせず、既に参加している P2P ネットワークの host へつなぐ。
+ * ssid/pass は参考(ログ・同一判定)で、子機は使わない。
+ */
+interface Adopt {
+  host: string;
+  iface: string | null;
+  isGO: boolean;
 }
 
 type WifiMsg = Extract<Wire, { kind: 'tether.wifi' }>;
@@ -92,6 +103,10 @@ export class Tether {
   private guestCaps: Capabilities | null = null;
   private capsWaiters: (() => void)[] = [];
   private reshares = 0;
+  /** adopt-nearby: P2P グループの購読解除と、待ち受け(echo/SOCKS)の認証情報 */
+  private offGroup: (() => void) | null = null;
+  private adoptSocks: Socks | null = null;
+  private adoptServed = false;
   private todoDone = new Set<string>();
 
   constructor(private p: TetherPlatform, private cfg: TetherConfig = {}) {
@@ -487,9 +502,16 @@ export class Tether {
       this.log(`共有を停止(エコー・SOCKS・Direct を閉じる share=${this.state.share})`);
       try { h.stopSocks(); } catch {}
       try { h.stopEcho(); } catch {}
-      try { h.stopHotspot(); } catch {}
-      void h.stopDirect().catch(() => {});
+      // adopt-nearby のグループは Nearby のもの。こちらからは消さない(Nearby の接続ごと壊さないため)
+      if (!this.adopting()) {
+        try { h.stopHotspot(); } catch {}
+        void h.stopDirect().catch(() => {});
+      }
     }
+    this.offGroup?.();
+    this.offGroup = null;
+    this.adoptSocks = null;
+    this.adoptServed = false;
     this.safeStopVpn();
     try { h.leaveWifi(); } catch {}
     this.shareMsg = null;
@@ -557,6 +579,10 @@ export class Tether {
     this.set({ share: 'starting', error: null });
     let again = false;
     try {
+      if (this.adopting()) {
+        await this.shareAdopt(gen);
+        return;
+      }
       // 子機の能力と自分の能力から、方式と順序を決める(キャッシュがあれば待たない)
       const plan = await this.ensurePlan(gen);
       if (gen !== this.gen || !plan) return;
@@ -582,8 +608,70 @@ export class Tether {
     if (again) this.reshare();
   }
 
+  // ---------- 親機: Nearby が作った P2P グループに乗る(directMode: 'adopt-nearby') ----------
+
+  private adopting(): boolean {
+    return this.cfg.directMode === 'adopt-nearby';
+  }
+
+  /**
+   * 固定グループは作らない。echo と SOCKS を先に待ち受け(ワイルドカード bind なので、あとからできる p2p インターフェースでも受ける)、
+   * P2P グループの出現・変化・消滅を見張る。グループができたら(または変わったら)接続情報を子機へ送る。
+   * グループは Nearby の帯域アップグレードで後から現れるので、ここでは待たず、share は 'starting' のままにする。
+   */
+  private async shareAdopt(gen: number): Promise<void> {
+    const h = this.p.hotspot;
+    this.log('Direct モード: adopt-nearby(固定グループは作らず、Nearby が作る P2P グループに乗る)');
+    try { h.startEcho(ECHO_PORT); this.log(`エコー起動 (port ${ECHO_PORT})`); } catch (e: any) { this.log('エコー起動失敗: ' + (e?.message ?? e)); }
+    const socks: Socks = this.adoptSocks ?? { port: SOCKS_PORT, user: 'u' + this.p.randomHex(4), pass: this.p.randomHex(12) };
+    try {
+      const { network } = await h.startSocks(socks.port, socks.user, socks.pass);
+      this.log(`SOCKS5 起動 (出口: ${network === 'cellular' ? '携帯回線' : '既定の回線'})`);
+    } catch (e: any) {
+      this.log('SOCKS 失敗: ' + (e?.message ?? e));
+      this.set({ share: 'failed', error: 'SOCKS 失敗: ' + (e?.message ?? e) });
+      return;
+    }
+    if (gen !== this.gen) return;
+    this.adoptSocks = socks;
+    if (!this.offGroup) this.offGroup = h.observeP2pGroup((g) => void this.onAdoptGroup(gen, g));
+  }
+
+  private async onAdoptGroup(gen: number, g: P2pGroup | null): Promise<void> {
+    if (gen !== this.gen || !this.adoptSocks) return;
+    const h = this.p.hotspot;
+    if (!g || !g.host) {
+      this.log(g ? `P2P グループあり(ssid=${g.ssid} isGO=${g.isGO})だが親機のアドレスが未確定: 待つ` : 'P2P グループなし(Nearby の都合で消えた/まだ無い): 次のグループを待つ');
+      if (this.shareMsg) {
+        this.shareMsg = null;
+        this.set({ share: 'starting', shareMethod: null, peerReach: null });
+      }
+      return;
+    }
+    const msg: WifiMsg = {
+      kind: 'tether.wifi', method: 'WifiDirect', ssid: g.ssid, pass: g.pass ?? '', port: ECHO_PORT, socks: this.adoptSocks,
+      adopt: { host: g.host, iface: g.iface, isGO: g.isGO },
+    };
+    // クライアント数だけの変化では送り直さない
+    if (this.shareMsg && sameWifi(this.shareMsg, msg)) return;
+    const prev = this.shareMsg?.adopt;
+    this.log(`P2P グループを採用: ssid=${g.ssid} isGO=${g.isGO} host=${g.host} iface=${g.iface ?? '?'} clients=${g.clients}${prev ? `(前: host=${prev.host} iface=${prev.iface ?? '?'})` : ''}`);
+    if (this.adoptServed) {
+      // 2 回目以降のグループ(IP は毎回同じとは限らない): 読み直した値で待ち受けを張り直す(ワイルドカード bind なので通常は不要だが、念のため)
+      this.log(`グループが変わった(host=${prev?.host ?? '(消滅を挟んだ)'} → ${g.host}): echo/SOCKS を再束縛`);
+      try { h.stopEcho(); h.startEcho(ECHO_PORT); } catch (e: any) { this.log('エコー再起動失敗: ' + (e?.message ?? e)); }
+      try { await h.startSocks(this.adoptSocks.port, this.adoptSocks.user, this.adoptSocks.pass); } catch (e: any) { this.log('SOCKS 再起動失敗: ' + (e?.message ?? e)); }
+      if (gen !== this.gen) return;
+    }
+    this.adoptServed = true;
+    this.shareMsg = msg;
+    this.set({ share: 'on', shareMethod: 'WifiDirect', error: null });
+    this.sendShare();
+  }
+
   /** 共有を作っている間に、より新しい判断(子機の能力を受信)で方式が変わったか */
   private needReshare(): boolean {
+    if (this.adopting()) return false; // adopt-nearby は方式判断に従わない
     const plan = this.state.plan;
     const m = this.state.shareMethod;
     return !!plan && plan.ok && plan.order.length > 0 && !!m && !plan.order.includes(m) && this.reshares < 2;
@@ -950,10 +1038,19 @@ export class Tether {
     this.joining = true;
     const h = this.p.hotspot;
     this.set({ wifi: 'joining', error: null, joinFailure: null });
-    this.log(`接続情報を受信 ssid=${m.ssid} → 参加(端末の承認ダイアログが出たら許可)`);
+    this.log(m.adopt
+      ? `接続情報を受信(adopt) host=${m.adopt.host} iface=${m.adopt.iface ?? '?'} isGO=${m.adopt.isGO} → Nearby が作った P2P ネットワークを探す(joinWifi は使わない)`
+      : `接続情報を受信 ssid=${m.ssid} → 参加(端末の承認ダイアログが出たら許可)`);
     try {
-      // 固定 SSID なら、承認ダイアログで「常に許可」を選んだ後は OS が覚える
-      const { gateway } = await h.joinWifi(m.ssid, m.pass);
+      let gateway: string;
+      if (m.adopt) {
+        const r = await h.adoptP2pNetwork(m.adopt.host, this.cfg.adoptWaitMs ?? 30_000);
+        gateway = r.gateway;
+        this.log(`子機が使う P2P: gu-ip source=${r.source} groupFormed=${r.groupFormed} net=${r.netKind} iface=${r.iface ?? '?'} localAddr=${r.localAddr ?? '?'} gateway=${r.gateway}`);
+      } else {
+        // 固定 SSID なら、承認ダイアログで「常に許可」を選んだ後は OS が覚える
+        gateway = (await h.joinWifi(m.ssid, m.pass)).gateway;
+      }
       if (gen !== this.gen) return;
       // join ok は OS が local-only ネットワークを渡しただけ。実際に親機まで届くかは、このあとの到達確認・VPN のログで見る
       this.log(`参加 ok gw=${gateway} → 到達確認(link=${this.state.link})`);
@@ -1045,7 +1142,7 @@ export class Tether {
 }
 
 const sameWifi = (a: WifiMsg, b: WifiMsg) =>
-  a.ssid === b.ssid && a.pass === b.pass && a.port === b.port && a.socks.user === b.socks.user && a.socks.pass === b.socks.pass && a.socks.port === b.socks.port;
+  a.ssid === b.ssid && a.pass === b.pass && a.port === b.port && a.adopt?.host === b.adopt?.host && a.adopt?.iface === b.adopt?.iface && a.socks.user === b.socks.user && a.socks.pass === b.socks.pass && a.socks.port === b.socks.port;
 
 const DEVICE_ROLE_KEY = 'tether.deviceRole';
 

@@ -69,13 +69,18 @@ class HotspotModule : Module() {
   private var groupUp = false
   private var groupEndReason: String? = null
   private var p2pReceiver: BroadcastReceiver? = null
+  // adopt-nearby(Nearby が作った P2P グループに乗る)用
+  private var obsReceiver: BroadcastReceiver? = null
+  private var obsCh: WifiP2pManager.Channel? = null
+  private var obsRetry = 0
+  private var adoptGen = 0
 
   private val ctx: Context get() = appContext.reactContext ?: error("no context")
   private val cm: ConnectivityManager get() = ctx.getSystemService(ConnectivityManager::class.java)
 
   override fun definition() = ModuleDefinition {
     Name("Hotspot")
-    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "log")
+    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "onP2pGroup", "log")
     OnCreate { DhLog.sink = { tag, line -> sendEvent("log", mapOf("tag" to tag, "line" to line)) } }
     OnDestroy { DhLog.sink = null }
 
@@ -176,6 +181,19 @@ class HotspotModule : Module() {
         override fun onFailure(reason: Int) { closeChannel(ch); stopGroupWatch(); promise.resolve(null) }
       })
     }
+
+
+    // ---- adopt-nearby: Nearby の帯域アップグレードが作った P2P グループに乗る(固定グループは作らない) ----
+    /** 親機: P2P グループの変化を onP2pGroup で通知する。始めた直後に現況を 1 回通知する。グループは作らない・消さない */
+    Function("startP2pObserve") { startP2pObserve() }
+    Function("stopP2pObserve") { stopP2pObserve() }
+
+    /**
+     * 子機: Nearby のアップグレードで既に参加している P2P ネットワークを探し、このプロセスの通信先に固定する(joinWifi の代わり)。
+     * GO の IP は、まず子機自身の WifiP2pManager(requestConnectionInfo の groupOwnerAddress)で問い合わせ(source=p2p-info)、
+     * 取れないとき(Nearby が通常の Wi-Fi 接続として参加させた等)だけ、親機が Nearby 制御メッセージで送った fallbackHost を使う(source=nearby-msg)。
+     */
+    AsyncFunction("adoptP2pNetwork") { fallbackHost: String?, timeoutMs: Int, promise: Promise -> adoptP2pNetwork(fallbackHost, timeoutMs.toLong(), promise) }
 
     /** 親機の SOCKS5 サーバー。携帯回線を要求して保持し、接続先への通信はそこを通す。 */
     AsyncFunction("startSocks") { port: Int, user: String, pass: String, promise: Promise ->
@@ -796,12 +814,161 @@ class HotspotModule : Module() {
     joinTimeout?.let { mainHandler.removeCallbacks(it) }
     joinTimeout = null
     joinGen++
+    adoptGen++
     if (joinPending != null) finishJoin("cancelled", "cancelled")
     else if (netCb != null && joined == null) sendEvent("onJoinPrompt", mapOf("ssid" to (joinedSsid ?: ""), "phase" to "cancelled")) // 要求が残ったまま取り下げ
     cm.bindProcessToNetwork(null)
     netCb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
     netCb = null
     joined = null; joinedSsid = null; joinedGw = null
+  }
+
+  // ---------- adopt-nearby ----------
+
+  private fun ifaceAddr(iface: String?): String? = runCatching {
+    if (iface == null) return@runCatching null
+    java.net.NetworkInterface.getByName(iface)?.inetAddresses?.toList()?.firstOrNull { it is java.net.Inet4Address }?.hostAddress
+  }.getOrNull()
+
+  /** 親機: 現況を JS とログへ。GO なら GO の IP(未確定は 192.168.49.1)、クライアントなら p2p インターフェースの自分の IP */
+  private fun emitP2pGroup(g: android.net.wifi.p2p.WifiP2pGroup?, goAddr: String?, why: String) {
+    if (g == null) {
+      DhLog.i(TAG, "nearby-group gone ${p2pStamp()} via=$why")
+      sendEvent("onP2pGroup", mapOf("present" to false, "group" to null))
+      return
+    }
+    val iface = g.`interface`
+    val host = if (g.isGroupOwner) (goAddr ?: ifaceAddr(iface) ?: "192.168.49.1") else ifaceAddr(iface)
+    val pass = g.passphrase
+    DhLog.i(TAG, "nearby-group ${p2pStamp()} via=$why ssid=${g.networkName} isGO=${g.isGroupOwner} goAddr=${goAddr ?: "-"} host=${host ?: "-"} iface=${iface ?: "-"} clients=${g.clientList.size} passTag=${if (pass != null) passTag(pass) else "-"} sta=${staFreqLabel()}")
+    if (host == null && obsRetry++ < 5) mainHandler.postDelayed({ if (obsReceiver != null) queryGroupNow("retry-no-host") }, 1_000L)
+    sendEvent("onP2pGroup", mapOf("present" to true, "group" to mapOf(
+      "ssid" to (g.networkName ?: ""), "pass" to pass, "isGO" to g.isGroupOwner, "host" to host, "iface" to iface, "clients" to g.clientList.size)))
+  }
+
+  private fun queryGroupNow(why: String) {
+    val m = ctx.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
+    val ch = obsCh ?: return
+    m.requestGroupInfo(ch) { g ->
+      m.requestConnectionInfo(ch) { info -> emitP2pGroup(g, if (info?.groupFormed == true) info.groupOwnerAddress?.hostAddress else null, why) }
+    }
+  }
+
+  @Suppress("DEPRECATION")
+  private fun startP2pObserve() {
+    stopP2pObserve()
+    obsRetry = 0
+    val m = ctx.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
+    obsCh = m.initialize(ctx, Looper.getMainLooper(), null)
+    val rcv = object : BroadcastReceiver() {
+      override fun onReceive(c: Context, i: Intent) {
+        if (i.action != WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION) return
+        val g = i.getParcelableExtra<android.net.wifi.p2p.WifiP2pGroup>(WifiP2pManager.EXTRA_WIFI_P2P_GROUP)
+        val info = i.getParcelableExtra<android.net.wifi.p2p.WifiP2pInfo>(WifiP2pManager.EXTRA_WIFI_P2P_INFO)
+        emitP2pGroup(g, if (info?.groupFormed == true) info.groupOwnerAddress?.hostAddress else null, "broadcast")
+      }
+    }
+    val f = IntentFilter(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
+    runCatching {
+      if (Build.VERSION.SDK_INT >= 33) ctx.applicationContext.registerReceiver(rcv, f, Context.RECEIVER_NOT_EXPORTED)
+      else ctx.applicationContext.registerReceiver(rcv, f)
+      obsReceiver = rcv
+    }.onFailure { DhLog.w(TAG, "p2p observe register failed $it") }
+    DhLog.i(TAG, "p2p observe start ${p2pStamp()} (グループは作らない・消さない)")
+    queryGroupNow("initial")
+  }
+
+  private fun stopP2pObserve() {
+    obsReceiver?.let { r -> runCatching { ctx.applicationContext.unregisterReceiver(r) } }
+    obsReceiver = null
+    obsCh?.let { closeChannel(it) }
+    obsCh = null
+  }
+
+  private fun netKindOf(cm: ConnectivityManager, n: Network): String {
+    val c = cm.getNetworkCapabilities(n)
+    val tr = listOf(NetworkCapabilities.TRANSPORT_WIFI to "WIFI", NetworkCapabilities.TRANSPORT_WIFI_AWARE to "WIFI_AWARE", NetworkCapabilities.TRANSPORT_CELLULAR to "CELL", NetworkCapabilities.TRANSPORT_BLUETOOTH to "BT")
+      .filter { c?.hasTransport(it.first) == true }.joinToString("+") { it.second }.ifEmpty { "?" }
+    val inet = c?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+    return "transports=$tr inet=$inet"
+  }
+
+  @Suppress("DEPRECATION")
+  private fun adoptP2pNetwork(fallbackHost: String?, timeoutMs: Long, promise: Promise) {
+    leave()
+    val gen = ++adoptGen
+    val m = ctx.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
+    val ch = m.initialize(ctx, Looper.getMainLooper(), null)
+    Thread {
+      val deadline = SystemClock.elapsedRealtime() + timeoutMs
+      var lastLog = 0L
+      var lastInfo = "groupFormed=? "
+      try {
+        while (SystemClock.elapsedRealtime() < deadline && gen == adoptGen) {
+          // 1) 子機自身の WifiP2pManager に問い合わせる
+          val latch = java.util.concurrent.CountDownLatch(1)
+          var formed = false; var isGo = false; var goAddr: String? = null; var iface: String? = null; var ssid: String? = null
+          m.requestConnectionInfo(ch) { info ->
+            formed = info?.groupFormed == true; isGo = info?.isGroupOwner == true; goAddr = info?.groupOwnerAddress?.hostAddress
+            m.requestGroupInfo(ch) { g -> iface = g?.`interface`; ssid = g?.networkName; latch.countDown() }
+          }
+          latch.await(2, java.util.concurrent.TimeUnit.SECONDS)
+          val p2pHost = if (formed && !isGo) goAddr else null
+          val host = p2pHost ?: fallbackHost
+          val source = if (p2pHost != null) "p2p-info" else "nearby-msg"
+          // 2) ネットワークを探す: p2p インターフェース、または host と同じ /24 の IPv4
+          var found: Network? = null; var foundLp: LinkProperties? = null
+          for (n in cm.allNetworks) {
+            val lp = cm.getLinkProperties(n) ?: continue
+            val byIface = lp.interfaceName?.startsWith("p2p") == true
+            val bySubnet = host != null && lp.linkAddresses.any { a ->
+              val b = a.address.address; val h = runCatching { InetAddress.getByName(host).address }.getOrNull()
+              a.address is java.net.Inet4Address && h != null && h.size == 4 && b[0] == h[0] && b[1] == h[1] && b[2] == h[2]
+            }
+            if (byIface || bySubnet) { found = n; foundLp = lp; break }
+          }
+          lastInfo = "gu-p2p groupFormed=$formed isGO=$isGo goAddr=${goAddr ?: "-"} p2pIface=${iface ?: "-"} ssid=${ssid ?: "-"} fallbackHost=${fallbackHost ?: "-"} netFound=${found != null}"
+          val now = SystemClock.elapsedRealtime()
+          if (now - lastLog > 3_000L) { lastLog = now; DhLog.i(TAG, "adopt probing ${p2pStamp()} $lastInfo") }
+          if (found != null && host != null) {
+            val lp = foundLp!!
+            val ifn = lp.interfaceName
+            val local = lp.linkAddresses.map { it.address }.firstOrNull { it is java.net.Inet4Address }?.hostAddress
+            val kind = netKindOf(cm, found)
+            DhLog.i(TAG, "gu-ip source=$source host=$host iface=${ifn ?: "-"} localAddr=${local ?: "-"} groupFormed=$formed p2pIface=${iface ?: "-"} net={$kind} defaultRoute=${gatewayOf(lp) ?: "-"} $lastInfo")
+            joined = found; joinedSsid = "p2p-adopt"; joinedGw = host
+            monitorAdopted(gen, found)
+            promise.resolve(mapOf("gateway" to host, "source" to source, "iface" to ifn, "localAddr" to local, "groupFormed" to formed, "netKind" to kind))
+            return@Thread
+          }
+          Thread.sleep(500)
+        }
+        DhLog.w(TAG, "adopt FAILED ${p2pStamp()} timeoutMs=$timeoutMs $lastInfo")
+        if (gen == adoptGen) promise.reject("E_ADOPT", "P2P ネットワークが見つからない($lastInfo)", null)
+        else promise.reject("E_ADOPT", "cancelled", null)
+      } catch (e: Exception) {
+        promise.reject("E_ADOPT", e.message ?: e.toString(), e)
+      } finally {
+        closeChannel(ch)
+      }
+    }.start()
+  }
+
+  /** 採用したネットワークが消えたら onWifiLost(Nearby の都合でグループが変わる/消える場合の検知) */
+  private fun monitorAdopted(gen: Int, n: Network) {
+    Thread {
+      while (gen == adoptGen) {
+        Thread.sleep(2_000)
+        if (gen != adoptGen) return@Thread
+        val alive = cm.allNetworks.contains(n) && cm.getLinkProperties(n)?.linkAddresses?.isNotEmpty() == true
+        if (!alive) {
+          DhLog.w(TAG, "adopted network lost ${p2pStamp()} iface-gone")
+          if (joined == n) { joined = null; joinedGw = null; joinedSsid = null }
+          sendEvent("onWifiLost", emptyMap<String, Any>())
+          return@Thread
+        }
+      }
+    }.start()
   }
 
   private fun gatewayOf(lp: LinkProperties): String? {

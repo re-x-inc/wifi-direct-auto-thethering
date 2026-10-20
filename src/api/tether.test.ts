@@ -235,3 +235,64 @@ test('stop で許可画面の案内も消える', async () => {
   assert.equal(guestT.getState().joinPrompt, false);
   hostT.stop();
 });
+
+// ---- directMode: 'adopt-nearby'(Nearby が作った P2P グループに乗る。既定の 'own' は上のテストが保証) ----
+const GROUP = { ssid: 'DIRECT-55-D81674', pass: 'pw', isGO: true, host: '192.168.49.1', iface: 'p2p-wlan0-0', clients: 0 };
+
+async function setupAdopt() {
+  const f = await pairedFakes();
+  return { ...f, hostT: new Tether(f.host.platform, { ...CFG, directMode: 'adopt-nearby' }), guestT: new Tether(f.guest.platform, CFG) };
+}
+
+test('adopt: 固定グループは作らず、グループが現れたら子機は joinWifi せず P2P ネットワークに乗って VPN まで張る', async () => {
+  const { hostT, guestT, host, guest } = await setupAdopt();
+  await hostT.start(); await guestT.start();
+  await until(() => host.calls.includes('observeP2pGroup'));
+  assert.equal(hostT.getState().share, 'starting'); // グループはまだ無い(Nearby のアップグレード待ち)
+  assert.ok(host.calls.includes('startEcho') && host.calls.includes('startSocks'));
+  host.emitGroup(GROUP);
+  await until(() => guestT.getState().vpn === 'on');
+  assert.equal(hostT.getState().share, 'on');
+  assert.ok(guest.calls.includes('adopt:192.168.49.1'));
+  assert.ok(!guest.calls.some((c) => c.startsWith('join:')), '子機は joinWifi を使わない');
+  for (const c of ['startDirect', 'stopDirect', 'startHotspot', 'stopHotspot']) assert.ok(!host.calls.includes(c), `親機は ${c} を呼ばない`);
+  await until(() => hostT.getState().peerReach?.ok === true);
+  hostT.stop(); guestT.stop();
+  assert.ok(!host.calls.includes('stopDirect'), '停止でも Nearby のグループは消さない');
+});
+
+test('adopt: クライアント数だけの変化では送り直さず、グループの消滅→新グループ(IP 変更)で子機に再送して張り直す', async () => {
+  const { hostT, guestT, host, guest } = await setupAdopt();
+  await hostT.start(); await guestT.start();
+  await until(() => host.calls.includes('observeP2pGroup'));
+  host.emitGroup(GROUP);
+  await until(() => guestT.getState().vpn === 'on');
+  const adopts = () => guest.calls.filter((c) => c.startsWith('adopt:')).length;
+  host.emitGroup({ ...GROUP, clients: 1 });
+  await wait(50);
+  assert.equal(adopts(), 1);
+  host.emitGroup(null);
+  await until(() => hostT.getState().share === 'starting');
+  assert.equal(hostT.getState().shareMethod, null);
+  host.emitGroup({ ...GROUP, host: '192.168.49.7', iface: 'p2p-wlan0-1' });
+  await until(() => guest.calls.includes('adopt:192.168.49.7'));
+  assert.equal(hostT.getState().share, 'on');
+  assert.ok(host.calls.filter((c) => c === 'startEcho').length >= 2, 'IP が変わったら echo を再束縛');
+  assert.ok(host.calls.filter((c) => c === 'startSocks').length >= 2, 'IP が変わったら SOCKS を再束縛');
+  hostT.stop(); guestT.stop();
+});
+
+test('adopt: 子機が P2P ネットワークを見つけられなければ失敗として結果を返す', async () => {
+  const f = await pairedFakes();
+  const g = fakePlatform(f.net.guest, { cellular: false, adoptError: 'P2P ネットワークが見つからない' });
+  await g.platform.kv.set('identity.v1', JSON.stringify({ id: 'DH-GUEST', name: 'DH-GUEST' }));
+  await g.platform.kv.set('pairs.v1', JSON.stringify([{ peerId: 'DH-HOST', peerName: 'DH-HOST', secret: 'shared-secret', createdAt: 1 }]));
+  const hostT = new Tether(f.host.platform, { ...CFG, directMode: 'adopt-nearby' });
+  const guestT = new Tether(g.platform, CFG);
+  await hostT.start(); await guestT.start();
+  await until(() => f.host.calls.includes('observeP2pGroup'));
+  f.host.emitGroup(GROUP);
+  await until(() => guestT.getState().wifi === 'failed');
+  assert.ok(!g.calls.includes('vpnStart'));
+  hostT.stop(); guestT.stop();
+});

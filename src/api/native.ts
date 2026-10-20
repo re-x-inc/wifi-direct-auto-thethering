@@ -38,6 +38,15 @@ export function nativePlatform(): TetherPlatform {
       bindToJoined: () => Hotspot.bindToJoined(),
       unbindProcess: () => Hotspot.unbindProcess(),
       probe: (h, port) => Hotspot.probe(h, port),
+      observeP2pGroup: (cb) => {
+        const sub = Hotspot.addListener('onP2pGroup', (e) => cb(e.present ? e.group : null));
+        Hotspot.startP2pObserve();
+        return () => {
+          sub.remove();
+          Hotspot.stopP2pObserve();
+        };
+      },
+      adoptP2pNetwork: (h, t) => Hotspot.adoptP2pNetwork(h, t),
       onWifiLost: (cb) => {
         const sub = Hotspot.addListener('onWifiLost', () => cb());
         return () => sub.remove();

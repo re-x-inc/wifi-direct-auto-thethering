@@ -2,7 +2,7 @@ import { fakeNearbyPair } from '../link/fakeNearby';
 import { NearbyApi } from '../link/nearbyTransport';
 import { KeyValue } from '../pairing/types';
 import type { NativeCapabilities } from './capability';
-import { HotspotPort, TetherPlatform, VpnPort } from './types';
+import { HotspotPort, P2pGroup, TetherPlatform, VpnPort } from './types';
 
 export const memKv = (): KeyValue => {
   const m = new Map<string, string>();
@@ -14,11 +14,12 @@ export const testRandomHex = (bytes: number) =>
   Array.from({ length: bytes }, () => ((n++ * 37 + 11) % 256).toString(16).padStart(2, '0')).join('');
 
 /** 端末の部品の偽物。呼び出しを calls に記録する。 */
-export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; directDelayMs?: number; joinError?: string; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[]; backgroundLocation?: boolean } = {}) {
+export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; directDelayMs?: number; joinError?: string; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[]; backgroundLocation?: boolean; adoptError?: string; adoptSource?: 'p2p-info' | 'nearby-msg' } = {}) {
   const calls: string[] = [];
   const files: Record<string, string> = {};
   const wifiLost = new Set<() => void>();
   const joinPrompt = new Set<(e: { ssid: string; phase: 'show' | 'ok' | 'declined' | 'timeout' | 'cancelled'; timeoutMs?: number }) => void>();
+  const groupSubs = new Set<(g: P2pGroup | null) => void>();
   const vpnState = { running: false, permitted: true };
   const hotspot: HotspotPort = {
     startHotspot: async () => (calls.push('startHotspot'), { ssid: 'AndroidShare_1', passphrase: 'lohspass' }),
@@ -47,6 +48,12 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     bindToJoined: () => true,
     unbindProcess: () => void calls.push('unbind'),
     probe: async () => ({ ok: true, rttMs: 3 }),
+    observeP2pGroup: (cb) => (calls.push('observeP2pGroup'), groupSubs.add(cb), () => void groupSubs.delete(cb)),
+    adoptP2pNetwork: async (host) => {
+      calls.push('adopt:' + host);
+      if (o.adoptError) throw new Error(o.adoptError);
+      return { gateway: host ?? '192.168.49.1', source: o.adoptSource ?? 'p2p-info', iface: 'p2p-wlan0-0', localAddr: '192.168.49.50', groupFormed: true, netKind: 'WIFI(p2p)' };
+    },
     onJoinPrompt: (cb) => (joinPrompt.add(cb), () => joinPrompt.delete(cb)),
     onWifiLost: (cb) => (wifiLost.add(cb), () => wifiLost.delete(cb)),
   };
@@ -98,7 +105,7 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))),
     now: () => Date.now(),
   };
-  return { platform, calls, files, vpnState, emitJoinPrompt: (e: Parameters<typeof joinPrompt.add>[0] extends (x: infer E) => void ? E : never) => joinPrompt.forEach((cb) => cb(e)), loseWifi: () => wifiLost.forEach((cb) => cb()) };
+  return { platform, calls, emitGroup: (g: P2pGroup | null) => groupSubs.forEach((cb) => cb(g)), files, vpnState, emitJoinPrompt: (e: Parameters<typeof joinPrompt.add>[0] extends (x: infer E) => void ? E : never) => joinPrompt.forEach((cb) => cb(e)), loseWifi: () => wifiLost.forEach((cb) => cb()) };
 }
 
 /** 両端末に同じ共有コードのペアを入れた、親機・子機の偽プラットフォーム(fakeNearbyPair の端末名に合わせる) */
