@@ -22,6 +22,7 @@ declare class NearbyLinkModule extends NativeModule<Events> {
   disconnect(endpointId: string): void;
   stop(): void;
   hmac(secret: string, data: string): string;
+  setDirectActive(on: boolean): void;
 }
 
 export default requireNativeModule<NearbyLinkModule>('NearbyLink');

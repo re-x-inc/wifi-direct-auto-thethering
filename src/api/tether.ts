@@ -490,6 +490,7 @@ export class Tether {
       try { h.stopHotspot(); } catch {}
       void h.stopDirect().catch(() => {});
     }
+    this.nearbyDirectActive(false);
     this.safeStopVpn();
     try { h.leaveWifi(); } catch {}
     this.shareMsg = null;
@@ -747,6 +748,7 @@ export class Tether {
     // Wi-Fi Direct のグループが残っていると、機種によっては LOHS の AP を作れないため、消えるのを待つ。
     h.stopSocks();
     try { h.stopHotspot(); } catch {}
+    this.nearbyDirectActive(false);
     await h.stopDirect().catch(() => {});
     await this.p.sleep(1500);
     if (gen !== this.gen) return null;
@@ -821,6 +823,7 @@ export class Tether {
       try {
         const t0 = this.p.now();
         const cred = await h.startDirect(name, pass, freq, plan.band, plan.reason);
+        this.nearbyDirectActive(true);
         this.log(`Wi-Fi Direct 成功(${this.p.now() - t0}ms, ${describePlan(plan)})`);
         if (this.abandoned(gen)) { await this.dropOrphan('Wi-Fi Direct'); return null; }
         void this.record('WifiDirect', 'create', true);
@@ -865,6 +868,14 @@ export class Tether {
     if (!force && t - this.lastTouch < 60_000) return;
     this.lastTouch = t;
     void this.store.touch(peerId, t).catch(() => {});
+  }
+
+  /**
+   * Wi-Fi Direct が張れている間は、Nearby の再接続を低電力(Wi-Fi 系へ帯域をアップグレードさせない)で始めるよう ネイティブへ知らせる。
+   * Nearby の帯域アップグレードが P2P を使い、固定の Direct グループを壊す疑いがあるため(docs/SPEC.md)。古いネイティブには無いので無視する
+   */
+  private nearbyDirectActive(on: boolean): void {
+    try { this.p.nearby.setDirectActive?.(on); } catch {}
   }
 
   private onConnected(role: TetherRole, gen: number): void {
@@ -925,6 +936,7 @@ export class Tether {
 
   private onWifiLost(gen: number): void {
     if (gen !== this.gen) return;
+    this.nearbyDirectActive(false);
     this.safeStopVpn();
     this.set({ wifi: 'off', vpn: this.vpnHold ? 'held' : 'off' });
     this.log('Wi-Fi Direct 切断 → VPN を停止');
@@ -958,6 +970,7 @@ export class Tether {
       // join ok は OS が local-only ネットワークを渡しただけ。実際に親機まで届くかは、このあとの到達確認・VPN のログで見る
       this.log(`参加 ok gw=${gateway} → 到達確認(link=${this.state.link})`);
       this.set({ wifi: 'joined' });
+      this.nearbyDirectActive(true);
       // 親機のポートが開くのが少し遅れることがあるので、一定間隔で再試行する
       const retries = this.cfg.probeRetries ?? 10;
       let res = await h.probe(gateway, m.port);

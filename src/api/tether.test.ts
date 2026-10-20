@@ -50,6 +50,18 @@ test('start だけで 接続 → 共有 → 子機が参加して VPN まで張�
   hostT.stop(); guestT.stop();
 });
 
+test('Direct が張れている間だけ Nearby に directActive=true を知らせ、止めたら false に戻す', async () => {
+  const { hostT, guestT, net: nearby } = await setup();
+  await hostT.start();
+  await guestT.start();
+  await until(() => guestT.getState().vpn === 'on');
+  assert.deepEqual(nearby.host.directActive.slice(-1), [true]); // 親機: startDirect 成功後
+  assert.deepEqual(nearby.guest.directActive.slice(-1), [true]); // 子機: joinWifi 成功後
+  hostT.stop(); guestT.stop();
+  assert.deepEqual(nearby.host.directActive.slice(-1), [false]);
+  assert.deepEqual(nearby.guest.directActive.slice(-1), [false]);
+});
+
 test('アプリのメッセージは相手に届き、内部メッセージは混ざらない', async () => {
   const { hostT, guestT } = await setup();
   const got: unknown[] = [];

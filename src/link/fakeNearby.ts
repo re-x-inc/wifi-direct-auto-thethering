@@ -10,7 +10,7 @@ type Handler = (e: any) => void;
  */
 export function fakeNearbyPair() {
   type Side = NearbyApi & {
-    name: string; advertising: boolean; discovering: boolean; endpoint: string | null;
+    name: string; directActive: boolean[]; advertising: boolean; discovering: boolean; endpoint: string | null;
     emit(ev: string, e: any): void; label: string;
   };
   let connected = false;
@@ -19,8 +19,9 @@ export function fakeNearbyPair() {
   const make = (name: string, label: 'H' | 'G'): Side => {
     const h = new Map<string, Set<Handler>>();
     const side: Side = {
-      name, label, advertising: false, discovering: false, endpoint: null,
+      name, label, directActive: [], advertising: false, discovering: false, endpoint: null,
       emit: (ev, e) => h.get(ev)?.forEach((cb) => cb(e)),
+      setDirectActive(on: boolean) { side.directActive.push(on); },
       advertise() { side.advertising = true; tryFind(); },
       discover() { side.discovering = true; tryFind(); },
       requestConnect() {

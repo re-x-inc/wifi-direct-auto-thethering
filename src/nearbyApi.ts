@@ -12,6 +12,7 @@ export const nearbyApi: NearbyApi = {
   disconnect: (id) => NearbyLink.disconnect(id),
   stop: () => NearbyLink.stop(),
   hmac: (s, d) => NearbyLink.hmac(s, d),
+  setDirectActive: (on) => (NearbyLink as any).setDirectActive?.(on),
   on: (ev, cb) => {
     const sub = (NearbyLink as any).addListener(ev, cb);
     return () => sub.remove();
