@@ -36,11 +36,19 @@ private const val LINK_TICK_MS = 5_000L
  *  "default" = 従来どおり(Nearby が WIFI_LAN・WIFI_HOTSPOT・WIFI_DIRECT へ帯域を自動で切り替える)
  *  "bt"      = Bluetooth Classic + BLE だけ。Wi-Fi 系(LAN/Aware/Hotspot/Direct)・NFC・WebRTC を使わせず、帯域の自動アップグレードも止める
  *  "ble"     = BLE だけ(Classic も使わない。8007 で繋がらないことがある)
+ *  "public"  = 非公開フィールドは触らず、公開 API(connectionType=NON_DISRUPTIVE・disruptiveUpgrade=false)だけ(既定)
+ * 注意: "bt"/"ble" の reflection は GMS に「Invalid advertising/discovery options for non-exempt client」で拒否される(2026-10-20 実機)。
+ *       non-exempt client(通常のアプリ)では bt/ble は使えない。試験用に残しているだけ。
  * 公開 API には medium を選ぶ設定が無い(connectionType・disruptiveUpgrade・lowPower のみ)ため、
  * Options 内の非公開フィールドを reflection で書き換える。フィールド名は play-services-nearby 19.3.0 の実物
  * (toString の並びと既定値で確認)。名前が合わない版では何もせず、ログに出す。
  */
-private const val NEARBY_MEDIUMS = "bt"
+private const val NEARBY_MEDIUMS = "public"
+
+/** GMS が Options を「Invalid … options for non-exempt client」で拒否したら true にし、以後は reflection なし(公開 API だけ)で作る */
+@Volatile private var mediumsFallback = false
+
+private fun isInvalidOptions(e: Exception) = e is IllegalStateException && (e.message ?: "").contains("Invalid")
 
 private fun setBool(o: Any, field: String, v: Boolean) {
   val f = o.javaClass.getDeclaredField(field)
@@ -51,7 +59,8 @@ private fun setBool(o: Any, field: String, v: Boolean) {
 
 /** NEARBY_MEDIUMS に従い、Options 内の medium フラグを書き換える。fields: [bluetooth, ble, wifiLan, nfc, wifiAware, wifiHotspot, wifiDirect, webRtc, autoUpgrade](無い項目は null) */
 private fun applyMediums(o: Any, kind: String, fields: Array<String?>): String {
-  if (NEARBY_MEDIUMS == "default") return "$kind mediums=default"
+  if (mediumsFallback) return "$kind mediums=public(fallback)"
+  if (NEARBY_MEDIUMS != "bt" && NEARBY_MEDIUMS != "ble") return "$kind mediums=$NEARBY_MEDIUMS"
   val bt = NEARBY_MEDIUMS == "bt"
   val want = booleanArrayOf(bt, true, false, false, false, false, false, false, false)
   return try {
@@ -186,7 +195,13 @@ class NearbyLinkModule : Module() {
     val o = ab.build()
     android.util.Log.i("DH-NEARBY", applyMediums(o, "advertise", ADV_FIELDS))
     client.stopAdvertising()
-    client.startAdvertising(name, SERVICE_ID, lifecycle, o).addOnFailureListener { e -> report("advertise", e) }
+    client.startAdvertising(name, SERVICE_ID, lifecycle, o).addOnFailureListener { e ->
+      if (!mediumsFallback && isInvalidOptions(e)) {
+        android.util.Log.w("DH-NEARBY", "advertise rejected ($e) -> 一度だけ公開 API のみの Options で始め直す")
+        mediumsFallback = true
+        startAdv(name)
+      } else report("advertise", e)
+    }
   }
 
   private fun startDisc() {
@@ -195,7 +210,13 @@ class NearbyLinkModule : Module() {
     android.util.Log.i("DH-NEARBY", "discover lowPower=$low")
     foundNames.clear()
     client.stopDiscovery()
-    client.startDiscovery(SERVICE_ID, discovery, discoveryOptions()).addOnFailureListener { e -> report("discover", e) }
+    client.startDiscovery(SERVICE_ID, discovery, discoveryOptions()).addOnFailureListener { e ->
+      if (!mediumsFallback && isInvalidOptions(e)) {
+        android.util.Log.w("DH-NEARBY", "discover rejected ($e) -> 一度だけ公開 API のみの Options で始め直す")
+        mediumsFallback = true
+        startDisc()
+      } else report("discover", e)
+    }
   }
 
   /** 広告名から相手の識別部分を取り出す。`P|<id>|<label>` なら id、そうでなければ名前そのまま(通常接続は selfId) */
@@ -275,7 +296,14 @@ class NearbyLinkModule : Module() {
     foundNames.clear()
     curLow = lowNow()
     client.stopDiscovery()
-    client.startDiscovery(SERVICE_ID, discovery, discoveryOptions()).addOnFailureListener { e -> report("rediscover", e) }
+    client.startDiscovery(SERVICE_ID, discovery, discoveryOptions()).addOnFailureListener { e ->
+      if (!mediumsFallback && isInvalidOptions(e)) {
+        android.util.Log.w("DH-NEARBY", "rediscover rejected ($e) -> 公開 API のみで始め直す")
+        mediumsFallback = true
+        client.stopDiscovery()
+        client.startDiscovery(SERVICE_ID, discovery, discoveryOptions()).addOnFailureListener { e2 -> report("rediscover", e2) }
+      } else report("rediscover", e)
+    }
   }
 
   /**
@@ -293,6 +321,12 @@ class NearbyLinkModule : Module() {
     val o = cb.build()
     android.util.Log.i("DH-NEARBY", applyMediums(o, "requestConnection", CONN_FIELDS))
     client.requestConnection(name, endpointId, lifecycle, o).addOnFailureListener { e ->
+      if (!mediumsFallback && isInvalidOptions(e)) {
+        android.util.Log.w("DH-NEARBY", "requestConnection rejected ($e) -> 一度だけ公開 API のみの Options で始め直す")
+        mediumsFallback = true
+        requestWithRetry(endpointId, name, attempt, rediscovered, deadline, peerIn)
+        return@addOnFailureListener
+      }
       val code = (e as? com.google.android.gms.common.api.ApiException)?.statusCode ?: -1
       android.util.Log.w("DH-NEARBY", "requestConnect attempt=${attempt + 1}/${RETRY_MAX + 1} code=$code peer=$peerName")
       report(if (attempt == 0) "requestConnect" else "requestConnect(retry$attempt)", e)
