@@ -198,6 +198,7 @@ class HotspotModule : Module() {
         }
         val srv = SocksServer(port, user, pass) { cellular ?: cm.activeNetwork }
         srv.start()
+        android.util.Log.i("DH-SOCKS", "start ok port=$port")
         socks = srv
         socksRef = srv
         // 携帯回線の確保を少し待つ
@@ -211,6 +212,7 @@ class HotspotModule : Module() {
       }
     }
     Function("stopSocks") {
+      android.util.Log.i("DH-SOCKS", "stop (was running=${socks != null})")
       socks?.stop(); socks = null
       cellCb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
       cellCb = null; cellular = null
@@ -247,13 +249,21 @@ class HotspotModule : Module() {
     /** 到達確認用の TCP エコーサーバー(受け取った文字列をそのまま返す) */
     Function("startEcho") { port: Int ->
       // JS のリロードでモジュールが作り直されても前回のソケットを閉じられるよう、静的に保持する
+      val hadOld = activeEcho != null || echo != null
       activeEcho?.close(); echo?.close()
-      val s = ServerSocket().apply { reuseAddress = true; bind(InetSocketAddress(port)) }
+      val s = try {
+        ServerSocket().apply { reuseAddress = true; bind(InetSocketAddress(port)) }
+      } catch (e: Exception) {
+        DhLog.w("DH-ECHO", "start FAILED port=$port ${e.javaClass.simpleName}: ${e.message}")
+        throw e
+      }
       echo = s; activeEcho = s
+      DhLog.i("DH-ECHO", "start ok port=$port bind=${s.localSocketAddress} replacedOld=$hadOld")
       Thread {
         while (!s.isClosed) {
           try {
             val c = s.accept()
+            DhLog.i("DH-ECHO", "accept from ${c.inetAddress?.hostAddress}")
             Thread {
               c.use { sock ->
                 val buf = ByteArray(256)
@@ -261,11 +271,15 @@ class HotspotModule : Module() {
                 if (n > 0) sock.getOutputStream().write(buf, 0, n)
               }
             }.start()
-          } catch (_: Exception) { break }
+          } catch (e: Exception) { if (!s.isClosed) DhLog.w("DH-ECHO", "accept loop ended: ${e.javaClass.simpleName}: ${e.message}"); break }
         }
+        DhLog.i("DH-ECHO", "accept loop exit closed=${s.isClosed}")
       }.start()
     }
-    Function("stopEcho") { echo?.close(); activeEcho?.close(); echo = null; activeEcho = null }
+    Function("stopEcho") {
+      DhLog.i("DH-ECHO", "stop (was listening=${activeEcho?.isClosed == false})")
+      echo?.close(); activeEcho?.close(); echo = null; activeEcho = null
+    }
 
     // ---- 子機 ----
     /** 接続情報で Wi-Fi に参加し、ゲートウェイ(=親機)のアドレスを返す。初回は端末の承認ダイアログが出る。 */

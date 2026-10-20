@@ -130,6 +130,21 @@ test('stop で共有・VPN・常駐をすべて止める', async () => {
   assert.equal(hostT.send('x'), false);
 });
 
+test('グループ作成中に stop されたら、後から出来た Direct グループを閉じる(エコーなしの孤児を残さない)', async () => {
+  const { net } = await pairedFakes();
+  const f = fakePlatform(net.host, { cellular: true, directDelayMs: 150 });
+  await f.platform.kv.set('identity.v1', JSON.stringify({ id: 'DH-HOST', name: 'h' }));
+  await f.platform.kv.set('pairs.v1', JSON.stringify([{ peerId: 'DH-GUEST', peerName: 'g', secret: 's', createdAt: 1 }]));
+  const t = new Tether(f.platform, CFG);
+  await t.start();
+  await until(() => f.calls.includes('startDirect'));
+  t.stop();
+  const stopsBefore = f.calls.filter((c) => c === 'stopDirect').length;
+  await until(() => f.calls.includes('directCreated'));
+  await until(() => f.calls.filter((c) => c === 'stopDirect').length > stopsBefore);
+  assert.equal(t.getState().share, 'off');
+});
+
 test('ペアリング → そのまま start できる(動いていたリンクは止めて、終わったら再開する)', async () => {
   const net = fakePairNet('4821');
   const a = new Tether(fakePlatform(net.a).platform, CFG);
