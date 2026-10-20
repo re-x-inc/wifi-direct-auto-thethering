@@ -21,6 +21,8 @@ import javax.crypto.spec.SecretKeySpec
 
 private const val SERVICE_ID = "info.rex.tether.link"
 private const val RETRY_MAX = 2
+private const val REDISCOVER_MAX = 2
+private const val REDISCOVER_TOTAL_MS = 30_000L
 
 /**
  * Nearby Connections の薄いラッパー。受け入れ可否・認証の方針は JS 側で決める
@@ -67,31 +69,95 @@ class NearbyLinkModule : Module() {
     sendEvent("onError", mapOf("op" to op, "code" to code))
   }
 
+  /** 探索で見えている相手(endpointId → 広告名)。接続失敗時に「誰に繋ごうとしていたか」を知るため */
+  private val foundNames = java.util.concurrent.ConcurrentHashMap<String, String>()
+  private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+  /** 探索のやり直し中の状態。同じ広告名の相手が再び見つかったら、新しい endpointId で接続し直す */
+  private class Rediscover(val peerName: String, val myName: String, val count: Int, val deadline: Long) {
+    var timeout: Runnable? = null
+  }
+  @Volatile private var rediscover: Rediscover? = null
+
+  private fun clearRediscover() {
+    rediscover?.timeout?.let { mainHandler.removeCallbacks(it) }
+    rediscover = null
+  }
+
+  private fun discoveryOptions() =
+    DiscoveryOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(!pairing).build()
+
   private val discovery = object : EndpointDiscoveryCallback() {
     override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
+      foundNames[endpointId] = info.endpointName
       sendEvent("onFound", mapOf("endpointId" to endpointId, "name" to info.endpointName))
+      val r = rediscover
+      if (r != null && info.endpointName == r.peerName) {
+        android.util.Log.i("DH-NEARBY", "rediscover ${r.count}/$REDISCOVER_MAX found ${info.endpointName} new endpointId=$endpointId -> reconnect")
+        clearRediscover()
+        requestWithRetry(endpointId, r.myName, 0, r.count)
+      }
     }
     override fun onEndpointLost(endpointId: String) {
+      foundNames.remove(endpointId)
       sendEvent("onLost", mapOf("endpointId" to endpointId))
     }
+  }
+
+  /**
+   * 8011 STATUS_ENDPOINT_UNKNOWN(Nearby 側でもう失われた endpointId)や、8007 の再試行が尽きたとき、
+   * stopDiscovery → startDiscovery で探索からやり直す。同じ広告名の相手が見つかったら新しい endpointId で接続し直す。
+   * 回数は REDISCOVER_MAX、全体の時間は REDISCOVER_TOTAL_MS まで。尽きたら何もせず(失敗は onError で通知済み)終える。
+   */
+  private fun startRediscover(peerName: String?, myName: String, done: Int, deadline: Long, why: Int) {
+    val now = android.os.SystemClock.elapsedRealtime()
+    if (peerName == null || done >= REDISCOVER_MAX || now >= deadline) {
+      android.util.Log.w("DH-NEARBY", "rediscover giveup peer=$peerName done=$done/$REDISCOVER_MAX remainMs=${deadline - now} code=$why")
+      return
+    }
+    val count = done + 1
+    android.util.Log.i("DH-NEARBY", "rediscover start $count/$REDISCOVER_MAX peer=$peerName code=$why remainMs=${deadline - now}")
+    clearRediscover()
+    val r = Rediscover(peerName, myName, count, deadline)
+    r.timeout = Runnable {
+      if (rediscover === r) {
+        android.util.Log.w("DH-NEARBY", "rediscover timeout $count/$REDISCOVER_MAX peer=$peerName (not found)")
+        rediscover = null
+        // 見つからなかったときは、時間が残っていれば次の回へ
+        startRediscover(peerName, myName, count, deadline, why)
+      }
+    }
+    rediscover = r
+    // 1回の待ちは、残り時間と回数で割った長さ(最低 5 秒)
+    val slice = maxOf(5_000L, (deadline - now) / (REDISCOVER_MAX - done))
+    mainHandler.postDelayed(r.timeout!!, minOf(slice, deadline - now))
+    foundNames.clear()
+    client.stopDiscovery()
+    client.startDiscovery(SERVICE_ID, discovery, discoveryOptions()).addOnFailureListener { e -> report("rediscover", e) }
   }
 
   /**
    * 接続の瞬間だけ省電力を外す(広告・探索は省電力のまま)。lowPower=false なら BLE 以外(Bluetooth Classic / Wi-Fi)も使える。
    * 8007 STATUS_RADIO_ERROR は一時的なことが多いので、間をおいて最大 RETRY_MAX 回まで再試行する。
    * 8003 ALREADY_CONNECTED は残骸の接続を切って繋ぎ直す。JS への失敗通知(onError)は従来どおり各回で出す。
+   * 8011 は再試行せず、8007 は再試行が尽きたら、探索からやり直す(startRediscover)。
+   * rediscovered は探索をやり直した回数。始めの呼び出し(JS から)は 0 で、全体の期限もそこから数える。
    */
-  private fun requestWithRetry(endpointId: String, name: String, attempt: Int) {
+  private fun requestWithRetry(endpointId: String, name: String, attempt: Int, rediscovered: Int = 0, deadline: Long = android.os.SystemClock.elapsedRealtime() + REDISCOVER_TOTAL_MS) {
+    val peerName = foundNames[endpointId]
     val o = ConnectionOptions.Builder().setLowPower(false).build()
     client.requestConnection(name, endpointId, lifecycle, o).addOnFailureListener { e ->
       val code = (e as? com.google.android.gms.common.api.ApiException)?.statusCode ?: -1
       android.util.Log.w("DH-NEARBY", "requestConnect attempt=${attempt + 1}/${RETRY_MAX + 1} code=$code")
       report(if (attempt == 0) "requestConnect" else "requestConnect(retry$attempt)", e)
       val retry = (code == 8003 || code == 8007) && attempt < RETRY_MAX
-      if (!retry) return@addOnFailureListener
+      if (!retry) {
+        if (code == 8011 || code == 8007) startRediscover(peerName, name, rediscovered, deadline, code)
+        return@addOnFailureListener
+      }
       if (code == 8003) client.disconnectFromEndpoint(endpointId)
-      android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-        requestWithRetry(endpointId, name, attempt + 1)
+      mainHandler.postDelayed({
+        requestWithRetry(endpointId, name, attempt + 1, rediscovered, deadline)
       }, if (code == 8003) 700L else 1500L)
     }
   }
@@ -114,7 +180,9 @@ class NearbyLinkModule : Module() {
     }
     Function("discover") {
       android.util.Log.i("DH-NEARBY", "discover lowPower=${!pairing}")
-      val o = DiscoveryOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(!pairing).build()
+      val o = discoveryOptions()
+      clearRediscover()
+      foundNames.clear()
       client.stopAllEndpoints()
       client.stopDiscovery()
       client.startDiscovery(SERVICE_ID, discovery, o).addOnFailureListener { e -> report("discover", e) }
@@ -128,6 +196,8 @@ class NearbyLinkModule : Module() {
     Function("disconnect") { endpointId: String -> client.disconnectFromEndpoint(endpointId) }
     Function("stop") {
       pairing = false
+      clearRediscover()
+      foundNames.clear()
       client.stopAdvertising(); client.stopDiscovery(); client.stopAllEndpoints()
     }
 
