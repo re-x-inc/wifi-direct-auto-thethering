@@ -733,17 +733,21 @@ export class Tether {
     const { ssid: name, pass } = await directCreds({ hmac: (s, d) => this.p.nearby.hmac(s, d), kv: this.p.kv, selfId: self.id, peerId, secret });
     // チャンネルは動的に決める: まずシステム任せ(周囲と親機の Wi-Fi を見て OS が選ぶ)、だめなら親機の Wi-Fi と同じ周波数。
     const staFreq = safeFreq(h);
-    for (const freq of pickDirectFrequencies(staFreq)) {
+    const plans = pickDirectPlans(staFreq);
+    this.log(`Wi-Fi Direct の帯域候補: 親機 Wi-Fi=${staFreq || '未接続'}MHz → ${plans.map((x) => describePlan(x)).join(' → ')}`);
+    for (const plan of plans) {
+      const freq = plan.freq;
+      this.log(`Wi-Fi Direct 帯域を選択: ${describePlan(plan)}(理由: ${plan.reason})`);
       try {
         const t0 = this.p.now();
-        const cred = await h.startDirect(name, pass, freq);
-        this.log(`Wi-Fi Direct 成功(${this.p.now() - t0}ms, ${freq ? freq + 'MHz' : 'ch自動'})`);
+        const cred = await h.startDirect(name, pass, freq, plan.band, plan.reason);
+        this.log(`Wi-Fi Direct 成功(${this.p.now() - t0}ms, ${describePlan(plan)})`);
         void this.record('WifiDirect', 'create', true);
         // 親機が Wi-Fi に接続したまま Direct を作れた = STA+P2P の同時動作を観測
         if (staFreq > 0) void this.observe('staP2pConcurrent', true);
         return { kind: 'tether.wifi', method: 'WifiDirect', ssid: cred.ssid, pass: cred.passphrase, port: ECHO_PORT, socks };
       } catch (e: any) {
-        this.log(`Wi-Fi Direct 失敗(${freq ?? '自動'}): ${e?.message ?? e}`);
+        this.log(`Wi-Fi Direct 失敗(${describePlan(plan)}): ${e?.message ?? e} → 次の候補へ`);
         if (gen !== this.gen) return null;
       }
     }
@@ -945,9 +949,30 @@ const safeFreq = (h: { wifiFrequency(): number }): number => {
   try { return h.wifiFrequency(); } catch { return 0; }
 };
 
-/** Direct を作るチャンネル(MHz)の候補を、優先順に返す。null = システム任せ。sta = 親機の Wi-Fi の周波数(未接続は 0) */
-export function pickDirectFrequencies(sta: number): (number | null)[] {
-  const dfs = sta >= 5260 && sta <= 5720; // DFS 帯ではグループオーナーになれない
-  const usable = (sta >= 2412 && sta <= 2472) || (sta >= 5170 && sta <= 5825 && !dfs);
-  return usable ? [null, sta] : [null];
+export interface DirectPlan {
+  /** 固定する周波数(MHz)。null = 帯域内の自動選択 */
+  freq: number | null;
+  band: '2.4' | '5';
+  reason: string;
+}
+const describePlan = (p: DirectPlan) => (p.freq ? `${p.band}GHz/${p.freq}MHz` : `${p.band}GHz/自動`);
+
+/**
+ * Direct(GO)を作る帯域・チャンネルの候補を、優先順に返す。sta = 親機の Wi-Fi の周波数(未接続は 0)。
+ * 親機の STA と GO が別チャンネルだと無線が時分割(MCC)になり、GO のビーコンが間欠になって子機のスキャンに出ないことがあるため、
+ * STA と同じチャンネル(次点で同じ帯域)を先に試し、だめなら 2.4GHz 自動(従来どおり)へ戻す。
+ */
+export function pickDirectPlans(sta: number): DirectPlan[] {
+  const auto24: DirectPlan = { freq: null, band: '2.4', reason: '2.4GHz 自動(従来どおり)' };
+  if (!(sta > 0)) return [{ ...auto24, reason: '親機が Wi-Fi 未接続: 従来どおり 2.4GHz 自動' }];
+  if (sta >= 2412 && sta <= 2484) return [{ freq: sta, band: '2.4', reason: '親機の Wi-Fi(2.4GHz)と同じチャンネルに合わせる' }, { ...auto24, reason: '同チャンネル失敗: 2.4GHz 自動へ' }];
+  if (sta >= 5170 && sta <= 5825) {
+    const dfs = sta >= 5260 && sta <= 5720;
+    return [
+      { freq: sta, band: '5', reason: dfs ? '親機の Wi-Fi は 5GHz DFS: 同チャンネルでの GO 作成を試す(拒否されうる)' : '親機の Wi-Fi(5GHz)と同じチャンネルに合わせる' },
+      { freq: null, band: '5', reason: '同チャンネル失敗: 5GHz 自動(同じ帯域で時分割を避ける)' },
+      { ...auto24, reason: '5GHz 失敗: 2.4GHz 自動へ戻す' },
+    ];
+  }
+  return [{ ...auto24, reason: `親機の Wi-Fi ${sta}MHz は対象外の帯域: 2.4GHz 自動` }];
 }

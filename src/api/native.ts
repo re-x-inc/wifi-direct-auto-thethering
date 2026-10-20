@@ -19,7 +19,7 @@ export function nativePlatform(): TetherPlatform {
     hotspot: {
       startHotspot: () => Hotspot.startHotspot(),
       stopHotspot: () => Hotspot.stopHotspot(),
-      startDirect: (n, p, f) => Hotspot.startDirect(n, p, f),
+      startDirect: (n, p, f, b, w) => Hotspot.startDirect(n, p, f, b ?? null, w ?? null),
       stopDirect: () => Hotspot.stopDirect(),
       startSocks: (port, u, p) => Hotspot.startSocks(port, u, p),
       stopSocks: () => Hotspot.stopSocks(),

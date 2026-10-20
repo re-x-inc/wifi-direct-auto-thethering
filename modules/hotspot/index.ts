@@ -36,7 +36,7 @@ declare class HotspotModule extends NativeModule<Events> {
   /** 診断レポートをこのアプリ専用のファイル領域に書き、パスを返す */
   saveDiagnosticFile(name: string, text: string): string;
   /** name/pass/freq を渡すと固定(例: 'DIRECT-dh-xxxx', 12文字, 2437。null はシステム任せ)。省略はランダム */
-  startDirect(name?: string | null, pass?: string | null, freq?: number | null): Promise<{ ssid: string; passphrase: string }>;
+  startDirect(name?: string | null, pass?: string | null, freq?: number | null, bandHint?: string | null, why?: string | null): Promise<{ ssid: string; passphrase: string }>;
   stopDirect(): Promise<void>;
   startSocks(port: number, user: string, pass: string): Promise<{ network: 'cellular' | 'default' }>;
   stopSocks(): void;

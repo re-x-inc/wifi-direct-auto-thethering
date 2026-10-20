@@ -104,7 +104,7 @@ class HotspotModule : Module() {
      * Wi-Fi Direct グループを、固定の名前・パスフレーズで作る(LocalOnlyHotspot が使えない端末向けの代替)。
      * 作成したグループには、子機が通常の Wi-Fi(WPA2)として joinWifi で参加できる。
      */
-    AsyncFunction("startDirect") { fixedName: String?, fixedPass: String?, freq: Int?, promise: Promise ->
+    AsyncFunction("startDirect") { fixedName: String?, fixedPass: String?, freq: Int?, bandHint: String?, why: String?, promise: Promise ->
       val m = ctx.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
       val ch = m.initialize(ctx, Looper.getMainLooper(), null)
       p2p = m; p2pCh = ch
@@ -114,15 +114,36 @@ class HotspotModule : Module() {
       val name = fixedName ?: ("DIRECT-dh-" + rnd(4))
       val pass = fixedPass ?: rnd(12)
       val b = WifiP2pConfig.Builder().setNetworkName(name).setPassphrase(pass).enablePersistentMode(false)
-      // 帯域は 2.4GHz に固定する(子機が見つけやすい)。2.4GHz の周波数が渡されたときはそのチャンネルに、それ以外は 2.4GHz 帯の自動選択にする
+      // 帯域・周波数の決め方(呼び出し側の候補順に 1 回ずつ試す。失敗は JS 側が次の候補へ進める):
+      //  - freq が 2.4/5GHz 帯の MHz のとき: そのチャンネルに固定(親機の Wi-Fi と同じチャンネル = 時分割なし)。API 29+ (setGroupOperatingFrequency)
+      //  - bandHint = "5": 5GHz 帯の自動選択(setGroupOperatingBand)。API 29+ かつ 5GHz 対応の端末のみ
+      //  - それ以外: 2.4GHz 帯の自動選択(従来どおり)
+      // いずれも createGroup と同じ権限(NEARBY_WIFI_DEVICES / ACCESS_FINE_LOCATION)で足りる。API 28 以下は帯域指定なし
       var band = "none"
+      val staMhz = runCatching {
+        @Suppress("DEPRECATION") val i = (ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager).connectionInfo
+        if (i != null && i.networkId != -1) i.frequency else 0
+      }.getOrDefault(0)
       if (Build.VERSION.SDK_INT >= 29) {
-        if (freq != null && freq in 2400..2500) { b.setGroupOperatingFrequency(freq); band = "2.4GHz/${freq}MHz" }
-        else { b.setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ); band = "2.4GHz/auto" }
+        val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val has5 = runCatching { wm.is5GHzBandSupported }.getOrDefault(true)
+        try {
+          if (freq != null && freq in 2400..2500) { b.setGroupOperatingFrequency(freq); band = "2.4GHz/${freq}MHz" }
+          else if (freq != null && freq in 4900..5900) {
+            if (!has5) { promise.reject("E_BAND", "5GHz 非対応の端末です(freq=$freq)", null); return@AsyncFunction }
+            b.setGroupOperatingFrequency(freq); band = "5GHz/${freq}MHz"
+          } else if (bandHint == "5") {
+            if (!has5) { promise.reject("E_BAND", "5GHz 非対応の端末です", null); return@AsyncFunction }
+            b.setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ); band = "5GHz/auto"
+          } else { b.setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ); band = "2.4GHz/auto" }
+        } catch (e: Exception) {
+          Log.w(TAG, "startDirect band setup failed freq=$freq hint=$bandHint $e -> 帯域指定なしで作る")
+          band = "none(setup failed)"
+        }
       }
       val cfg = b.build()
       // パスフレーズは出さない
-      Log.i(TAG, "startDirect ssid=$name passLen=${pass.length} passTag=${passTag(pass)} band=$band(requested freq=${freq ?: 0})")
+      Log.i(TAG, "startDirect ssid=$name passLen=${pass.length} passTag=${passTag(pass)} band=$band(requested freq=${freq ?: 0} hint=${bandHint ?: "-"}) staMHz=$staMhz sdk=${Build.VERSION.SDK_INT} why=${why ?: "-"}")
       // 以前のグループが残っていれば消してから作る(BUSY のときは段階的に片付ける。手順と結果は DH-P2P のログ)
       clearThenCreate(m, ch, cfg, name, pass, promise)
     }

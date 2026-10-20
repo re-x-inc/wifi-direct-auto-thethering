@@ -77,7 +77,7 @@ export interface MessageMeta {
 export interface HotspotPort {
   startHotspot(): Promise<{ ssid: string; passphrase: string }>;
   stopHotspot(): void;
-  startDirect(name: string | null, pass: string | null, freq: number | null): Promise<{ ssid: string; passphrase: string }>;
+  startDirect(name: string | null, pass: string | null, freq: number | null, bandHint?: '2.4' | '5' | null, why?: string | null): Promise<{ ssid: string; passphrase: string }>;
   stopDirect(): Promise<void>;
   startSocks(port: number, user: string, pass: string): Promise<{ network: 'cellular' | 'default' }>;
   stopSocks(): void;
