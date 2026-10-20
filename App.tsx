@@ -46,6 +46,11 @@ export default function App() {
   }, []);
 
   const addPair = async (role: 'host' | 'guest') => {
+    const perm = await tether.ensurePermissions();
+    if (!perm.granted) {
+      Alert.alert('権限が足りません', perm.missing.map((m) => m.slice(m.lastIndexOf('.') + 1)).join(', ') || '権限を許可してください');
+      return;
+    }
     setPairing({ role, devices: [], confirm: null, message: '', waiting: false });
     ctl.current = await tether.beginPairing(role, {
       onDevices: (devices) => setPairing((p) => p && { ...p, devices }),

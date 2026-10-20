@@ -62,6 +62,7 @@ object CapabilityProbe {
     need += "android.permission.BLUETOOTH_CONNECT" to 31
     need += "android.permission.NEARBY_WIFI_DEVICES" to 33
     need += "android.permission.POST_NOTIFICATIONS" to 33
+    need += "android.permission.ACCESS_LOCAL_NETWORK" to 37
     val missing = need.filter { sdk >= it.second && app.checkSelfPermission(it.first) != PackageManager.PERMISSION_GRANTED }
       .map { it.first.substringAfterLast('.') }
 

@@ -5,25 +5,11 @@ import KeepAlive from '../../modules/keep-alive';
 import VpnTunnel from '../../modules/vpn-tunnel';
 import { nearbyApi } from '../nearbyApi';
 import { secureKv } from '../pairing/secureKv';
+import { permsFor } from './permissions';
 import { Tether } from './tether';
 import { TetherConfig, TetherError, TetherPlatform } from './types';
 
-const BT_PERMS = [
-  'android.permission.BLUETOOTH_SCAN',
-  'android.permission.BLUETOOTH_ADVERTISE',
-  'android.permission.BLUETOOTH_CONNECT',
-];
-
-/**
- * Android のバージョンごとに、要求する実行時権限を切り替える(存在しない権限を要求すると denied になり、全体が失敗扱いになる)。
- * SDK<31: 位置情報(Bluetooth/Wi-Fi の探索に必要) / 31–32: Bluetooth 三種+位置情報 / 33 以上: Bluetooth 三種+NEARBY_WIFI_DEVICES+通知
- */
-export function permsFor(sdk: number): string[] {
-  const loc = 'android.permission.ACCESS_FINE_LOCATION';
-  if (sdk < 31) return [loc];
-  if (sdk < 33) return [...BT_PERMS, loc];
-  return [...BT_PERMS, 'android.permission.NEARBY_WIFI_DEVICES', 'android.permission.POST_NOTIFICATIONS'];
-}
+export { permsFor } from './permissions';
 
 /** 実機用の部品。ネイティブモジュールと SecureStore につなぐ。 */
 export function nativePlatform(): TetherPlatform {
@@ -69,6 +55,11 @@ export function nativePlatform(): TetherPlatform {
       status: () => VpnTunnel.status(),
     },
     keepAlive: { start: () => KeepAlive.start(), stop: () => KeepAlive.stop() },
+    missingPermissions: async () => {
+      const miss: string[] = [];
+      for (const p of permsFor(Number(Platform.Version))) if (!(await PermissionsAndroid.check(p as any))) miss.push(p);
+      return miss;
+    },
     requestPermissions: async () => {
       const res = await PermissionsAndroid.requestMultiple(permsFor(Number(Platform.Version)) as any[]);
       return Object.values(res).every((v) => v === 'granted');
