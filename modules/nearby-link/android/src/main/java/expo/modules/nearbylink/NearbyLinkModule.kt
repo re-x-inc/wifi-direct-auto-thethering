@@ -21,6 +21,14 @@ import javax.crypto.spec.SecretKeySpec
 
 private const val SERVICE_ID = "info.rex.tether.link"
 private const val RETRY_MAX = 2
+private const val REDISCOVER_MAX = 2
+private const val REDISCOVER_TOTAL_MS = 30_000L
+// ペア保存後の通常接続: つながるまでの間の省電力の扱い(BLE だけだと 8007 で繋がらないため、はじめは lowPower=false)
+private const val LINK_FULL_POWER_MS = 120_000L // つながらないまま続いたら省電力に落とす
+private const val LINK_CYCLE_MS = 60_000L // 以降はこの間隔で
+private const val LINK_BURST_MS = 20_000L // この長さだけ lowPower=false で試す
+private const val LINK_STALE_MS = 300_000L // 動きが止まってこれだけ経ったら、はじめからやり直す
+private const val LINK_TICK_MS = 5_000L
 
 /**
  * Nearby Connections の薄いラッパー。受け入れ可否・認証の方針は JS 側で決める
@@ -49,6 +57,7 @@ class NearbyLinkModule : Module() {
       ))
     }
     override fun onConnectionResult(endpointId: String, result: ConnectionResolution) {
+      if (result.status.isSuccess) linkSince = null // つながったので、次に切れたらはじめから(lowPower=false)
       if (result.status.isSuccess) sendEvent("onConnected", mapOf("endpointId" to endpointId))
       else sendEvent("onFailed", mapOf("endpointId" to endpointId, "code" to result.status.statusCode))
     }
@@ -67,31 +76,158 @@ class NearbyLinkModule : Module() {
     sendEvent("onError", mapOf("op" to op, "code" to code))
   }
 
+  // ---- 通常接続(ペア保存後)の省電力制御 ----
+  private var linkSince: Long? = null // つながっていない状態が始まった時刻。onConnected で消す
+  private var lastActivity = 0L
+  private var advName: String? = null
+  private var discovering = false
+  private var curLow: Boolean? = null
+  private val powerTick = object : Runnable {
+    override fun run() {
+      if (pairing || (advName == null && !discovering)) return
+      val low = lowNow()
+      if (low != curLow) {
+        android.util.Log.i("DH-NEARBY", "link power switch lowPower=$low (advertise=${advName != null} discover=$discovering)")
+        advName?.let { startAdv(it) }
+        if (discovering) startDisc()
+      }
+      mainHandler.postDelayed(this, LINK_TICK_MS)
+    }
+  }
+
+  /** いまの広告・探索を lowPower にするか。ペアリング中は常に false。通常接続は、つながるまでの経過時間で決める */
+  private fun lowNow(): Boolean {
+    if (pairing) return false
+    val since = linkSince ?: return false
+    val el = android.os.SystemClock.elapsedRealtime() - since
+    if (el < LINK_FULL_POWER_MS) return false
+    return (el - LINK_FULL_POWER_MS) % LINK_CYCLE_MS >= LINK_BURST_MS
+  }
+
+  private fun touchLink() {
+    val now = android.os.SystemClock.elapsedRealtime()
+    if (linkSince == null || now - lastActivity > LINK_STALE_MS) linkSince = now
+    lastActivity = now
+  }
+
+  private fun startAdv(name: String) {
+    val low = lowNow()
+    curLow = low
+    android.util.Log.i("DH-NEARBY", "advertise lowPower=$low name=$name")
+    val o = AdvertisingOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(low).build()
+    client.stopAdvertising()
+    client.startAdvertising(name, SERVICE_ID, lifecycle, o).addOnFailureListener { e -> report("advertise", e) }
+  }
+
+  private fun startDisc() {
+    val low = lowNow()
+    curLow = low
+    android.util.Log.i("DH-NEARBY", "discover lowPower=$low")
+    foundNames.clear()
+    client.stopDiscovery()
+    client.startDiscovery(SERVICE_ID, discovery, discoveryOptions()).addOnFailureListener { e -> report("discover", e) }
+  }
+
+  /** 広告名から相手の識別部分を取り出す。`P|<id>|<label>` なら id、そうでなければ名前そのまま(通常接続は selfId) */
+  private fun peerKey(name: String): String =
+    if (name.startsWith("P|")) name.split('|').getOrElse(1) { name } else name
+
+  /** 探索で見えている相手(endpointId → 広告名)。接続失敗時に「誰に繋ごうとしていたか」を知るため */
+  private val foundNames = java.util.concurrent.ConcurrentHashMap<String, String>()
+  private val knownNames = java.util.concurrent.ConcurrentHashMap<String, String>()
+  private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+  /** 探索のやり直し中の状態。同じ広告名の相手が再び見つかったら、新しい endpointId で接続し直す */
+  private class Rediscover(val peerName: String, val myName: String, val count: Int, val deadline: Long) {
+    var timeout: Runnable? = null
+  }
+  @Volatile private var rediscover: Rediscover? = null
+
+  private fun clearRediscover() {
+    rediscover?.timeout?.let { mainHandler.removeCallbacks(it) }
+    rediscover = null
+  }
+
+  private fun discoveryOptions() =
+    DiscoveryOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(lowNow()).build()
+
   private val discovery = object : EndpointDiscoveryCallback() {
     override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
+      foundNames[endpointId] = info.endpointName
+      if (knownNames.size > 64) knownNames.clear()
+      knownNames[endpointId] = info.endpointName
       sendEvent("onFound", mapOf("endpointId" to endpointId, "name" to info.endpointName))
+      val r = rediscover
+      if (r != null && peerKey(info.endpointName) == peerKey(r.peerName)) {
+        android.util.Log.i("DH-NEARBY", "rediscover ${r.count}/$REDISCOVER_MAX found ${info.endpointName} new endpointId=$endpointId -> reconnect")
+        clearRediscover()
+        requestWithRetry(endpointId, r.myName, 0, r.count, r.deadline, r.peerName)
+      }
     }
     override fun onEndpointLost(endpointId: String) {
+      foundNames.remove(endpointId)
       sendEvent("onLost", mapOf("endpointId" to endpointId))
     }
+  }
+
+  /**
+   * 8011 STATUS_ENDPOINT_UNKNOWN(Nearby 側でもう失われた endpointId)や、8007 の再試行が尽きたとき、
+   * stopDiscovery → startDiscovery で探索からやり直す。同じ広告名の相手が見つかったら新しい endpointId で接続し直す。
+   * 回数は REDISCOVER_MAX、全体の時間は REDISCOVER_TOTAL_MS まで。尽きたら何もせず(失敗は onError で通知済み)終える。
+   */
+  private fun startRediscover(peerName: String?, myName: String, done: Int, deadlineIn: Long, why: Int) {
+    val now = android.os.SystemClock.elapsedRealtime()
+    // 全体の期限は、最初の探索やり直しを始めた時点から数える(0 = まだ始めていない)
+    val deadline = if (deadlineIn == 0L) now + REDISCOVER_TOTAL_MS else deadlineIn
+    if (peerName == null || done >= REDISCOVER_MAX || now >= deadline) {
+      android.util.Log.w("DH-NEARBY", "rediscover giveup peer=$peerName done=$done/$REDISCOVER_MAX remainMs=${deadline - now} code=$why")
+      return
+    }
+    val count = done + 1
+    android.util.Log.i("DH-NEARBY", "rediscover start $count/$REDISCOVER_MAX peer=$peerName code=$why remainMs=${deadline - now}")
+    clearRediscover()
+    val r = Rediscover(peerName, myName, count, deadline)
+    r.timeout = Runnable {
+      if (rediscover === r) {
+        android.util.Log.w("DH-NEARBY", "rediscover timeout $count/$REDISCOVER_MAX peer=$peerName (not found)")
+        rediscover = null
+        // 見つからなかったときは、時間が残っていれば次の回へ
+        startRediscover(peerName, myName, count, deadline, why)
+      }
+    }
+    rediscover = r
+    // 1回の待ちは、残り時間と回数で割った長さ(最低 5 秒)
+    val slice = maxOf(5_000L, (deadline - now) / (REDISCOVER_MAX - done))
+    mainHandler.postDelayed(r.timeout!!, minOf(slice, deadline - now))
+    foundNames.clear()
+    curLow = lowNow()
+    client.stopDiscovery()
+    client.startDiscovery(SERVICE_ID, discovery, discoveryOptions()).addOnFailureListener { e -> report("rediscover", e) }
   }
 
   /**
    * 接続の瞬間だけ省電力を外す(広告・探索は省電力のまま)。lowPower=false なら BLE 以外(Bluetooth Classic / Wi-Fi)も使える。
    * 8007 STATUS_RADIO_ERROR は一時的なことが多いので、間をおいて最大 RETRY_MAX 回まで再試行する。
    * 8003 ALREADY_CONNECTED は残骸の接続を切って繋ぎ直す。JS への失敗通知(onError)は従来どおり各回で出す。
+   * 8011 は再試行せず、8007 は再試行が尽きたら、探索からやり直す(startRediscover)。
+   * rediscovered は探索をやり直した回数。始めの呼び出し(JS から)は 0 で、全体の期限もそこから数える。
    */
-  private fun requestWithRetry(endpointId: String, name: String, attempt: Int) {
+  private fun requestWithRetry(endpointId: String, name: String, attempt: Int, rediscovered: Int = 0, deadline: Long = 0L, peerIn: String? = null) {
+    // 相手の広告名: 引き継いだもの → 探索で見えているもの → 以前見えたもの の順。stop() で探索の記録が消えても追えるようにする
+    val peerName = peerIn ?: foundNames[endpointId] ?: knownNames[endpointId]
     val o = ConnectionOptions.Builder().setLowPower(false).build()
     client.requestConnection(name, endpointId, lifecycle, o).addOnFailureListener { e ->
       val code = (e as? com.google.android.gms.common.api.ApiException)?.statusCode ?: -1
-      android.util.Log.w("DH-NEARBY", "requestConnect attempt=${attempt + 1}/${RETRY_MAX + 1} code=$code")
+      android.util.Log.w("DH-NEARBY", "requestConnect attempt=${attempt + 1}/${RETRY_MAX + 1} code=$code peer=$peerName")
       report(if (attempt == 0) "requestConnect" else "requestConnect(retry$attempt)", e)
       val retry = (code == 8003 || code == 8007) && attempt < RETRY_MAX
-      if (!retry) return@addOnFailureListener
+      if (!retry) {
+        if (code == 8011 || code == 8007) startRediscover(peerName, name, rediscovered, deadline, code)
+        return@addOnFailureListener
+      }
       if (code == 8003) client.disconnectFromEndpoint(endpointId)
-      android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-        requestWithRetry(endpointId, name, attempt + 1)
+      mainHandler.postDelayed({
+        requestWithRetry(endpointId, name, attempt + 1, rediscovered, deadline, peerName)
       }, if (code == 8003) 700L else 1500L)
     }
   }
@@ -104,20 +240,24 @@ class NearbyLinkModule : Module() {
     Function("advertise") { name: String ->
       // ペアリング中(名前が P| で始まる)だけ省電力を外す。BLE だけだと 8007 で繋がらないことがあり、Bluetooth Classic / Wi-Fi も使えるようにする。終わったら stop() か通常の名前で省電力に戻る
       pairing = name.startsWith("P|")
-      android.util.Log.i("DH-NEARBY", "advertise lowPower=${!pairing} name=$name")
-      val o = AdvertisingOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(!pairing).build()
+      if (!pairing) touchLink()
       // 停止→再開始で前回の広告が残っていると ALREADY_ADVERTISING になるため、先に止める(同じ client への呼び出しは順序どおり処理される)
       // 前回の接続の残骸(GMS が ALREADY_CONNECTED と思い込む)を一掃してから始める
       client.stopAllEndpoints()
-      client.stopAdvertising()
-      client.startAdvertising(name, SERVICE_ID, lifecycle, o).addOnFailureListener { e -> report("advertise", e) }
+      advName = name
+      startAdv(name)
+      mainHandler.removeCallbacks(powerTick)
+      if (!pairing) mainHandler.postDelayed(powerTick, LINK_TICK_MS)
     }
     Function("discover") {
-      android.util.Log.i("DH-NEARBY", "discover lowPower=${!pairing}")
-      val o = DiscoveryOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(!pairing).build()
+      if (!pairing) touchLink()
+      clearRediscover()
       client.stopAllEndpoints()
       client.stopDiscovery()
-      client.startDiscovery(SERVICE_ID, discovery, o).addOnFailureListener { e -> report("discover", e) }
+      discovering = true
+      startDisc()
+      mainHandler.removeCallbacks(powerTick)
+      if (!pairing) mainHandler.postDelayed(powerTick, LINK_TICK_MS)
     }
     Function("requestConnect") { endpointId: String, name: String -> requestWithRetry(endpointId, name, 0) }
     Function("accept") { endpointId: String -> client.acceptConnection(endpointId, payloads) }
@@ -128,6 +268,13 @@ class NearbyLinkModule : Module() {
     Function("disconnect") { endpointId: String -> client.disconnectFromEndpoint(endpointId) }
     Function("stop") {
       pairing = false
+      advName = null
+      discovering = false
+      curLow = null
+      mainHandler.removeCallbacks(powerTick)
+      lastActivity = android.os.SystemClock.elapsedRealtime()
+      clearRediscover()
+      foundNames.clear()
       client.stopAdvertising(); client.stopDiscovery(); client.stopAllEndpoints()
     }
 
