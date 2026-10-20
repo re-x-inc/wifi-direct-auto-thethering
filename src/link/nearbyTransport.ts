@@ -14,6 +14,8 @@ export interface NearbyApi {
   disconnect(endpointId: string): void;
   stop(): void;
   hmac(secret: string, data: string): string;
+  /** Wi-Fi Direct が張れている間 true。Nearby の再接続を低電力で始める(未実装のネイティブでは無し) */
+  setDirectActive?(on: boolean): void;
   on(event: string, cb: Handler): () => void;
 }
 

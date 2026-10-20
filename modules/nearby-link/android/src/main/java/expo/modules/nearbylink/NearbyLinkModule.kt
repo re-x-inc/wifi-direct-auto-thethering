@@ -33,6 +33,10 @@ private const val LINK_CYCLE_MS = 60_000L // 以降はこの間隔で
 private const val LINK_BURST_MS = 20_000L // この長さだけ lowPower=false で試す
 private const val LINK_STALE_MS = 300_000L // 動きが止まってこれだけ経ったら、はじめからやり直す
 private const val LINK_TICK_MS = 5_000L
+// Wi-Fi Direct が張れている間は、つながっていない Nearby を、はじめのこの時間だけ lowPower=true(Wi-Fi 系への帯域アップグレードを起こさせない)で探す。
+// 実機(razr=GO)で Nearby のアップグレードが固定の Direct グループを消した疑いがあるため。ただし BLE だけだと 8007 で繋がらない前例があるので、
+// この時間つながらなければ通常の lowPower=false に戻す(下の時間割)。ペアリング中は対象外
+private const val DIRECT_LOW_MS = 20_000L
 
 /**
  * Nearby に使わせる medium の切り替え(試験で比べるため 1 か所):
@@ -225,6 +229,8 @@ class NearbyLinkModule : Module() {
   private var advName: String? = null
   private var discovering = false
   private var curLow: Boolean? = null
+  /** Wi-Fi Direct が張れている間 true(JS から setDirectActive で知らされる) */
+  @Volatile private var directActive = false
   private val powerTick = object : Runnable {
     override fun run() {
       if (pairing || (advName == null && !discovering)) return
@@ -261,6 +267,7 @@ class NearbyLinkModule : Module() {
     if (pairing || connected.isNotEmpty()) return false
     val since = linkSince ?: return false
     val el = android.os.SystemClock.elapsedRealtime() - since
+    if (directActive && el < DIRECT_LOW_MS) return true
     if (el < LINK_FULL_POWER_MS) return false
     return (el - LINK_FULL_POWER_MS) % LINK_CYCLE_MS >= LINK_BURST_MS
   }
@@ -410,7 +417,10 @@ class NearbyLinkModule : Module() {
       mainHandler.postDelayed({ requestWithRetry(endpointId, name, attempt, rediscovered, deadline, peerIn) }, waitMs)
       return
     }
-    val cb = ConnectionOptions.Builder().setLowPower(false)
+    // 低電力で始めるのは Direct が張れている間の最初の試行だけ(8007 などで失敗したら再試行は lowPower=false)。ペアリング中は常に false
+    val connLow = attempt == 0 && lowNow()
+    DhLog.i("DH-NEARBY", "requestConnection lowPower=$connLow directActive=$directActive attempt=$attempt")
+    val cb = ConnectionOptions.Builder().setLowPower(connLow)
     if (NEARBY_MEDIUMS != "default") cb.setConnectionType(com.google.android.gms.nearby.connection.ConnectionType.NON_DISRUPTIVE).setDisruptiveUpgrade(false)
     val o = cb.build()
     DhLog.i("DH-NEARBY", applyMediums(o, "requestConnection", CONN_FIELDS))
@@ -491,6 +501,10 @@ class NearbyLinkModule : Module() {
       if (inFlight.add(endpointId)) requestWithRetry(endpointId, name, 0)
       else DhLog.i("DH-NEARBY", "requestConnect skipped: already in flight ep=$endpointId")
     }
+    Function("setDirectActive") { on: Boolean ->
+      if (directActive != on) DhLog.i("DH-NEARBY", "directActive=$on")
+      directActive = on
+    }
     Function("accept") { endpointId: String -> client.acceptConnection(endpointId, payloads) }
     Function("reject") { endpointId: String -> client.rejectConnection(endpointId) }
     Function("send") { endpointId: String, text: String ->
@@ -503,6 +517,7 @@ class NearbyLinkModule : Module() {
     }
     Function("stop") {
       pairing = false
+      directActive = false
       connected.clear()
       advName = null
       discovering = false
