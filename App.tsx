@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, type ScrollViewInstance, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { Confirm, Found, getTether, Identity, Pair, TetherState } from './src/api';
 import { DiagnosticsPanel } from './src/DiagnosticsPanel';
+import { PostPairIntro, usePostPairSeen } from './src/ui/PostPairIntro';
+import { type LinkPhase, linkSummary } from './src/ui/connectText';
 
 const hhmmss = () => new Date().toTimeString().slice(0, 8);
 
@@ -22,6 +24,8 @@ export default function App() {
   const [introDone, setIntroDone] = useState(false);
   const [deviceRole, setDeviceRole] = useState<'host' | 'guest' | null | undefined>(undefined);
   const [pairing, setPairing] = useState<PairingUi | null>(null);
+  const intro = usePostPairSeen();
+  const [introVisible, setIntroVisible] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const ctl = useRef<{ connectTo(id: string): void; cancel(): void } | null>(null);
 
@@ -51,7 +55,8 @@ export default function App() {
         ctl.current = null;
         void reload();
         setPairing(null);
-        Alert.alert(r.ok ? 'ペアリング完了' : 'ペアリング失敗', r.ok ? `${r.pair.peerName} とペアになりました。以後は自動で接続します。` : r.error);
+        if (r.ok && !intro.seen) setIntroVisible(true); // 初回だけ「次にやること」を出す
+        else Alert.alert(r.ok ? 'ペアリング完了' : 'ペアリング失敗', r.ok ? `${r.pair.peerName} とペアになりました。以後は自動で接続します。` : r.error);
       },
     });
   };
@@ -87,8 +92,11 @@ export default function App() {
     ...(s.role === 'guest' ? [['VPN', VPN_TEXT[s.vpn]] as [string, string]] : []),
   ];
 
+  const sum = s.started ? linkSummary(s.link === 'stopped' ? 'idle' : (s.link as LinkPhase), s.error) : null;
+
   return (
     <View style={styles.root}>
+      <PostPairIntro visible={introVisible} onDone={() => { intro.markSeen(); setIntroVisible(false); }} />
       <View style={styles.appBar}><Text style={styles.title}>Tether Auto Connect</Text></View>
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.label}>この端末</Text>
@@ -121,6 +129,12 @@ export default function App() {
 
         <Text style={styles.label}>状態</Text>
         <View style={styles.card}>
+          {sum && (
+            <View style={[styles.row, styles.badge, sum.tone === 'ok' ? styles.badgeOk : styles.badgeWarn]} accessibilityLabel={sum.text}>
+              {s.link === 'connecting' && <ActivityIndicator size="small" color={C.primary} />}
+              <Text style={[styles.primary, { flex: 1 }]}>{sum.text}</Text>
+            </View>
+          )}
           {stateRows.map(([k, v], i) => (
             <View key={k} style={[styles.listRow, i > 0 && styles.divider]}>
               <Text style={[styles.secondary, { width: 96 }]}>{k}</Text>
@@ -277,6 +291,9 @@ const styles = StyleSheet.create({
   divider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.line },
   primary: { fontSize: 18, color: C.text },
   secondary: { fontSize: 15, color: C.sub },
+  badge: { padding: 12, borderRadius: 8, marginBottom: 6 },
+  badgeOk: { backgroundColor: '#dff3e6' },
+  badgeWarn: { backgroundColor: '#fff3d6' },
   err: { color: C.error, fontSize: 15 },
   actions: { gap: 8, marginTop: 16 },
   btn: { height: 52, borderRadius: 26, paddingHorizontal: 24, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
