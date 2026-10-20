@@ -43,6 +43,8 @@ export interface PairingOptions {
   timeoutMs?: number;
   /** この端末の役割。host=「親機になる」: 広告だけして、子機からの接続要求を待つ。guest=「子機になる」: 親機を探して接続要求を出す */
   role: 'host' | 'guest';
+  /** 親機で新ペアを保存したとき、同じ表示名の旧ペアを置き換えて消したら呼ぶ(旧 peerId の付随データを消すため) */
+  onReplaced?: (old: Pair[]) => void | Promise<void>;
 }
 
 type Wire = { t: 'pair'; id: string; label: string; secret: string } | { t: 'paired' };
@@ -170,14 +172,21 @@ export class PairingSession {
       // 受け側: 共有コードを保存して、受け取ったことを返す
       if (typeof w.secret !== 'string' || w.secret.length < 32) return this.finish({ ok: false, error: '共有コードが不正です' });
       const pair: Pair = { peerId: w.id, peerName: w.label || a.peer.label, secret: w.secret, createdAt: now, role: this.o.role };
-      await this.o.store.save(pair);
+      await this.save(pair);
       this.write({ t: 'paired' });
       this.finish({ ok: true, pair });
     } else if (w.t === 'paired' && a.initiator && this.pending) {
       const pair: Pair = { peerId: a.peer.id, peerName: a.peer.label, secret: this.pending, createdAt: now, role: this.o.role };
-      await this.o.store.save(pair);
+      await this.save(pair);
       this.finish({ ok: true, pair });
     }
+  }
+
+  /** 保存する。親機は、同じ表示名の旧ペアが残っていれば置き換える(名前が違うものは消さない) */
+  private async save(pair: Pair): Promise<void> {
+    const old = this.o.role === 'host' ? await this.o.store.removeSameName(pair) : [];
+    await this.o.store.save(pair);
+    if (old.length) await Promise.resolve(this.o.onReplaced?.(old)).catch(() => {});
   }
 
   private write(w: Wire): void {

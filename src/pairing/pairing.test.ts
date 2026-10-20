@@ -135,3 +135,43 @@ test('親機同士・子機同士では見つからない(親機は広告だけ�
   assert.equal(h2.st.devices.length, 0);
   h1.s.stop(); h2.s.stop();
 });
+
+test('親機: 新ペア完了時、同じ表示名の旧ペアは置き換え、名前が違うものは残す', async () => {
+  const { A, B, idA, storeB } = await setup();
+  await storeB.save({ peerId: 'Told', peerName: idA.name, secret: 'old', createdAt: 1 });
+  await storeB.save({ peerId: 'Tother', peerName: 'べつ', secret: 'x', createdAt: 1 });
+  const replaced: string[] = [];
+  (B.s as any).o.onReplaced = (old: any[]) => void replaced.push(...old.map((p) => p.peerId));
+  A.s.start(); B.s.start();
+  await until(() => A.st.devices.length === 1);
+  A.s.connectTo(A.st.devices[0].endpointId);
+  await until(() => !!A.st.confirm && !!B.st.confirm);
+  A.st.confirm!.accept(); B.st.confirm!.accept();
+  await until(() => !!A.st.result && !!B.st.result);
+  const ids = (await storeB.list()).map((p) => p.peerId).sort();
+  assert.deepEqual(ids, [idA.id, 'Tother'].sort());
+  assert.deepEqual(replaced, ['Told']);
+});
+
+test('子機側(guest)は同名の旧ペアを自動では消さない', async () => {
+  const { A, B, idB, storeA } = await setup();
+  await storeA.save({ peerId: 'Told', peerName: idB.name, secret: 'old', createdAt: 1 });
+  A.s.start(); B.s.start();
+  await until(() => A.st.devices.length === 1);
+  A.s.connectTo(A.st.devices[0].endpointId);
+  await until(() => !!A.st.confirm && !!B.st.confirm);
+  A.st.confirm!.accept(); B.st.confirm!.accept();
+  await until(() => !!A.st.result && !!B.st.result);
+  assert.equal((await storeA.list()).length, 2);
+});
+
+test('touch: lastSeenAt を更新する(無いペアは何もしない・旧データは未設定のまま読める)', async () => {
+  const store = new PairStore(mem());
+  await store.save({ peerId: 'Tx', peerName: 'x', secret: 's', createdAt: 1 });
+  assert.equal((await store.list())[0].lastSeenAt, undefined);
+  await store.touch('Tx', 99);
+  await store.touch('none', 5);
+  const l = await store.list();
+  assert.equal(l.length, 1);
+  assert.equal(l[0].lastSeenAt, 99);
+});

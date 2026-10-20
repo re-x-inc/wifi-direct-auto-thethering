@@ -23,6 +23,23 @@ export class PairStore {
     await this.kv.set(PAIRS, JSON.stringify([...rest, p]));
   }
 
+  /** 接続・受信のたびに最終接続時刻を更新する。ペアが無ければ何もしない */
+  async touch(peerId: string, at: number): Promise<void> {
+    const all = await this.list();
+    const p = all.find((x) => x.peerId === peerId);
+    if (!p) return;
+    p.lastSeenAt = at;
+    await this.kv.set(PAIRS, JSON.stringify(all));
+  }
+
+  /** 同じ表示名で別の peerId の旧ペアを消し、消したペアを返す(相手がデータ消去・再インストールで ID が変わった場合の置き換え) */
+  async removeSameName(p: Pair): Promise<Pair[]> {
+    const all = await this.list();
+    const stale = all.filter((x) => x.peerName === p.peerName && x.peerId !== p.peerId);
+    if (stale.length) await this.kv.set(PAIRS, JSON.stringify(all.filter((x) => !stale.includes(x))));
+    return stale;
+  }
+
   async remove(peerId: string): Promise<void> {
     await this.kv.set(PAIRS, JSON.stringify((await this.list()).filter((x) => x.peerId !== peerId)));
   }
