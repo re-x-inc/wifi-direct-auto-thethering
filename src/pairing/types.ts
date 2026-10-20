@@ -18,6 +18,8 @@ export interface Identity {
 export interface KeyValue {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<void>;
+  /** 削除(未対応の実装では directCreds が空文字で上書きして無効にする) */
+  remove?(key: string): Promise<void>;
 }
 
 /** 画面に出す端末名(端末IDの末尾から作る)。広告名には載せない(低電力の広告は名前に使える余地が小さい) */

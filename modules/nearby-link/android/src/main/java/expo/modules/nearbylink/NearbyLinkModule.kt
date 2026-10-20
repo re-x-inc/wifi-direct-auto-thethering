@@ -125,7 +125,7 @@ class NearbyLinkModule : Module() {
     val now = android.os.SystemClock.elapsedRealtime()
     val d = diags[endpointId]
     val q = when (d?.quality) { 1 -> "LOW(BT/BLE)"; 2 -> "MEDIUM"; 3 -> "HIGH(Wi-Fi系)"; 0 -> "UNKNOWN"; else -> "none" }
-    android.util.Log.w("DH-NEARBY",
+    DhLog.w("DH-NEARBY",
       "conn-fail code=$code(${com.google.android.gms.nearby.connection.ConnectionsStatusCodes.getStatusCodeString(code)}) ep=$endpointId peer=$peerName " +
       "mediums=$NEARBY_MEDIUMS lowPowerReq=${d?.lowPowerReq} discLowPower=${d?.curLow} elapsedMs=${d?.let { now - it.startedAt }} " +
       "lastCb=${d?.lastCb} lastCbAgoMs=${d?.let { now - it.lastCbAt }} bandwidth=$q attempt=${d?.attempts} " +
@@ -165,7 +165,7 @@ class NearbyLinkModule : Module() {
     override fun onBandwidthChanged(endpointId: String, info: com.google.android.gms.nearby.connection.BandwidthInfo) {
       // quality: 0=UNKNOWN 1=LOW(BT/BLE) 2=MEDIUM 3=HIGH(Wi-Fi 系)。medium 名そのものは API に無い
       val q = when (info.quality) { 1 -> "LOW(BT/BLE)"; 2 -> "MEDIUM"; 3 -> "HIGH(Wi-Fi系)"; else -> "UNKNOWN" }
-      android.util.Log.i("DH-NEARBY", "bandwidth changed ep=$endpointId quality=$q mediums=$NEARBY_MEDIUMS")
+      DhLog.i("DH-NEARBY", "bandwidth changed ep=$endpointId quality=$q mediums=$NEARBY_MEDIUMS")
       diags[endpointId]?.quality = info.quality
       markCb(endpointId, "onBandwidthChanged($q)")
       sendEvent("onBandwidth", mapOf("endpointId" to endpointId, "quality" to info.quality))
@@ -184,7 +184,7 @@ class NearbyLinkModule : Module() {
   /** 開始系の失敗を握りつぶさず、コード付きでログと JS に伝える */
   private fun report(op: String, e: Exception) {
     val code = (e as? com.google.android.gms.common.api.ApiException)?.statusCode ?: -1
-    android.util.Log.w("DH-NEARBY", "$op failed code=$code ${com.google.android.gms.nearby.connection.ConnectionsStatusCodes.getStatusCodeString(code)} $e")
+    DhLog.w("DH-NEARBY", "$op failed code=$code ${com.google.android.gms.nearby.connection.ConnectionsStatusCodes.getStatusCodeString(code)} $e")
     sendEvent("onError", mapOf("op" to op, "code" to code))
   }
 
@@ -200,7 +200,7 @@ class NearbyLinkModule : Module() {
       if (pairing || (advName == null && !discovering)) return
       val low = lowNow()
       if (low != curLow) {
-        android.util.Log.i("DH-NEARBY", "link power switch lowPower=$low (advertise=${advName != null} discover=$discovering)")
+        DhLog.i("DH-NEARBY", "link power switch lowPower=$low (advertise=${advName != null} discover=$discovering)")
         advName?.let { startAdv(it) }
         if (discovering) startDisc()
       }
@@ -212,7 +212,7 @@ class NearbyLinkModule : Module() {
   private fun linkUp(endpointId: String) {
     connected.add(endpointId)
     linkSince = null
-    android.util.Log.i("DH-NEARBY", "link up connected=${connected.size} lowPower=false (つながっている間は省電力にしない)")
+    DhLog.i("DH-NEARBY", "link up connected=${connected.size} lowPower=false (つながっている間は省電力にしない)")
   }
 
   /** つながりが切れた/つながれなかった。誰ともつながっていなければ、ここから「つながっていない時間」を数え直す */
@@ -222,7 +222,7 @@ class NearbyLinkModule : Module() {
       val now = android.os.SystemClock.elapsedRealtime()
       linkSince = now
       lastActivity = now
-      android.util.Log.i("DH-NEARBY", "link down connected=0 -> full power ${LINK_FULL_POWER_MS / 1000}s, then power-save cycle")
+      DhLog.i("DH-NEARBY", "link down connected=0 -> full power ${LINK_FULL_POWER_MS / 1000}s, then power-save cycle")
     }
   }
 
@@ -245,15 +245,15 @@ class NearbyLinkModule : Module() {
   private fun startAdv(name: String) {
     val low = lowNow()
     curLow = low
-    android.util.Log.i("DH-NEARBY", "advertise lowPower=$low name=$name")
+    DhLog.i("DH-NEARBY", "advertise lowPower=$low name=$name")
     val ab = AdvertisingOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(low)
     if (NEARBY_MEDIUMS != "default") ab.setConnectionType(com.google.android.gms.nearby.connection.ConnectionType.NON_DISRUPTIVE).setDisruptiveUpgrade(false)
     val o = ab.build()
-    android.util.Log.i("DH-NEARBY", applyMediums(o, "advertise", ADV_FIELDS))
+    DhLog.i("DH-NEARBY", applyMediums(o, "advertise", ADV_FIELDS))
     client.stopAdvertising()
     client.startAdvertising(name, SERVICE_ID, lifecycle, o).addOnFailureListener { e ->
       if (!mediumsFallback && isInvalidOptions(e)) {
-        android.util.Log.w("DH-NEARBY", "advertise rejected ($e) -> 一度だけ公開 API のみの Options で始め直す")
+        DhLog.w("DH-NEARBY", "advertise rejected ($e) -> 一度だけ公開 API のみの Options で始め直す")
         mediumsFallback = true
         startAdv(name)
       } else report("advertise", e)
@@ -263,12 +263,12 @@ class NearbyLinkModule : Module() {
   private fun startDisc() {
     val low = lowNow()
     curLow = low
-    android.util.Log.i("DH-NEARBY", "discover lowPower=$low")
+    DhLog.i("DH-NEARBY", "discover lowPower=$low")
     foundNames.clear()
     client.stopDiscovery()
     client.startDiscovery(SERVICE_ID, discovery, discoveryOptions()).addOnFailureListener { e ->
       if (!mediumsFallback && isInvalidOptions(e)) {
-        android.util.Log.w("DH-NEARBY", "discover rejected ($e) -> 一度だけ公開 API のみの Options で始め直す")
+        DhLog.w("DH-NEARBY", "discover rejected ($e) -> 一度だけ公開 API のみの Options で始め直す")
         mediumsFallback = true
         startDisc()
       } else report("discover", e)
@@ -297,7 +297,7 @@ class NearbyLinkModule : Module() {
 
   private fun discoveryOptions(): DiscoveryOptions {
     val o = DiscoveryOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(lowNow()).build()
-    android.util.Log.i("DH-NEARBY", applyMediums(o, "discover", DISC_FIELDS))
+    DhLog.i("DH-NEARBY", applyMediums(o, "discover", DISC_FIELDS))
     return o
   }
 
@@ -309,10 +309,10 @@ class NearbyLinkModule : Module() {
       sendEvent("onFound", mapOf("endpointId" to endpointId, "name" to info.endpointName))
       val r = rediscover
       if (r != null && peerKey(info.endpointName) == peerKey(r.peerName)) {
-        android.util.Log.i("DH-NEARBY", "rediscover ${r.count}/$REDISCOVER_MAX found ${info.endpointName} new endpointId=$endpointId -> reconnect")
+        DhLog.i("DH-NEARBY", "rediscover ${r.count}/$REDISCOVER_MAX found ${info.endpointName} new endpointId=$endpointId -> reconnect")
         clearRediscover()
         if (inFlight.add(endpointId)) requestWithRetry(endpointId, r.myName, 0, r.count, r.deadline, r.peerName)
-        else android.util.Log.i("DH-NEARBY", "rediscover: requestConnection already in flight ep=$endpointId -> skip")
+        else DhLog.i("DH-NEARBY", "rediscover: requestConnection already in flight ep=$endpointId -> skip")
       }
     }
     override fun onEndpointLost(endpointId: String) {
@@ -331,16 +331,16 @@ class NearbyLinkModule : Module() {
     // 全体の期限は、最初の探索やり直しを始めた時点から数える(0 = まだ始めていない)
     val deadline = if (deadlineIn == 0L) now + REDISCOVER_TOTAL_MS else deadlineIn
     if (peerName == null || done >= REDISCOVER_MAX || now >= deadline) {
-      android.util.Log.w("DH-NEARBY", "rediscover giveup peer=$peerName done=$done/$REDISCOVER_MAX remainMs=${deadline - now} code=$why")
+      DhLog.w("DH-NEARBY", "rediscover giveup peer=$peerName done=$done/$REDISCOVER_MAX remainMs=${deadline - now} code=$why")
       return
     }
     val count = done + 1
-    android.util.Log.i("DH-NEARBY", "rediscover start $count/$REDISCOVER_MAX peer=$peerName code=$why remainMs=${deadline - now}")
+    DhLog.i("DH-NEARBY", "rediscover start $count/$REDISCOVER_MAX peer=$peerName code=$why remainMs=${deadline - now}")
     clearRediscover()
     val r = Rediscover(peerName, myName, count, deadline)
     r.timeout = Runnable {
       if (rediscover === r) {
-        android.util.Log.w("DH-NEARBY", "rediscover timeout $count/$REDISCOVER_MAX peer=$peerName (not found)")
+        DhLog.w("DH-NEARBY", "rediscover timeout $count/$REDISCOVER_MAX peer=$peerName (not found)")
         rediscover = null
         // 見つからなかったときは、時間が残っていれば次の回へ
         startRediscover(peerName, myName, count, deadline, why)
@@ -355,7 +355,7 @@ class NearbyLinkModule : Module() {
     client.stopDiscovery()
     client.startDiscovery(SERVICE_ID, discovery, discoveryOptions()).addOnFailureListener { e ->
       if (!mediumsFallback && isInvalidOptions(e)) {
-        android.util.Log.w("DH-NEARBY", "rediscover rejected ($e) -> 公開 API のみで始め直す")
+        DhLog.w("DH-NEARBY", "rediscover rejected ($e) -> 公開 API のみで始め直す")
         mediumsFallback = true
         client.stopDiscovery()
         client.startDiscovery(SERVICE_ID, discovery, discoveryOptions()).addOnFailureListener { e2 -> report("rediscover", e2) }
@@ -376,14 +376,14 @@ class NearbyLinkModule : Module() {
     // 直前の失敗の後始末が済むまで待つ(重ねると 8009)。待つ間も、この endpoint の枠(inFlight)は持ったまま
     val waitMs = settleUntil - android.os.SystemClock.elapsedRealtime()
     if (waitMs > 0) {
-      android.util.Log.i("DH-NEARBY", "requestConnect wait ${waitMs}ms (前の失敗の後始末中) ep=$endpointId")
+      DhLog.i("DH-NEARBY", "requestConnect wait ${waitMs}ms (前の失敗の後始末中) ep=$endpointId")
       mainHandler.postDelayed({ requestWithRetry(endpointId, name, attempt, rediscovered, deadline, peerIn) }, waitMs)
       return
     }
     val cb = ConnectionOptions.Builder().setLowPower(false)
     if (NEARBY_MEDIUMS != "default") cb.setConnectionType(com.google.android.gms.nearby.connection.ConnectionType.NON_DISRUPTIVE).setDisruptiveUpgrade(false)
     val o = cb.build()
-    android.util.Log.i("DH-NEARBY", applyMediums(o, "requestConnection", CONN_FIELDS))
+    DhLog.i("DH-NEARBY", applyMediums(o, "requestConnection", CONN_FIELDS))
     val startedAt = android.os.SystemClock.elapsedRealtime()
     val prev = diags[endpointId]
     // 試行をまたいで「最初の要求からの経過」を数える(再試行でも startedAt は最初のまま)
@@ -391,13 +391,13 @@ class NearbyLinkModule : Module() {
                         else ConnDiag(startedAt, false, curLow)
     client.requestConnection(name, endpointId, lifecycle, o).addOnFailureListener { e ->
       if (!mediumsFallback && isInvalidOptions(e)) {
-        android.util.Log.w("DH-NEARBY", "requestConnection rejected ($e) -> 一度だけ公開 API のみの Options で始め直す")
+        DhLog.w("DH-NEARBY", "requestConnection rejected ($e) -> 一度だけ公開 API のみの Options で始め直す")
         mediumsFallback = true
         requestWithRetry(endpointId, name, attempt, rediscovered, deadline, peerIn)
         return@addOnFailureListener
       }
       val code = (e as? com.google.android.gms.common.api.ApiException)?.statusCode ?: -1
-      android.util.Log.w("DH-NEARBY", "requestConnect attempt=${attempt + 1}/${RETRY_MAX + 1} code=$code peer=$peerName")
+      DhLog.w("DH-NEARBY", "requestConnect attempt=${attempt + 1}/${RETRY_MAX + 1} code=$code peer=$peerName")
       markCb(endpointId, "requestConnection failed($code)")
       logConnFail(endpointId, code, peerName)
       report(if (attempt == 0) "requestConnect" else "requestConnect(retry$attempt)", e)
@@ -406,7 +406,7 @@ class NearbyLinkModule : Module() {
         // 待つ間は枠(inFlight)も settleUntil も保ち、次の requestConnection を出させない。
         client.disconnectFromEndpoint(endpointId)
         settleUntil = android.os.SystemClock.elapsedRealtime() + SETTLE_MS
-        android.util.Log.i("DH-NEARBY", "cleanup code=$code ep=$endpointId disconnectFromEndpoint -> ${SETTLE_MS}ms 待って rediscover")
+        DhLog.i("DH-NEARBY", "cleanup code=$code ep=$endpointId disconnectFromEndpoint -> ${SETTLE_MS}ms 待って rediscover")
         mainHandler.postDelayed({
           release(endpointId)
           diags.remove(endpointId)
@@ -430,7 +430,9 @@ class NearbyLinkModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("NearbyLink")
-    Events("onFound", "onLost", "onInitiated", "onConnected", "onFailed", "onDisconnected", "onMessage", "onError", "onBandwidth")
+    Events("onFound", "onLost", "onInitiated", "onConnected", "onFailed", "onDisconnected", "onMessage", "onError", "onBandwidth", "log")
+    OnCreate { DhLog.sink = { tag, line -> sendEvent("log", mapOf("tag" to tag, "line" to line)) } }
+    OnDestroy { DhLog.sink = null }
 
     // 1対1。待っている間(広告・探索)は省電力(BLE のみ)。接続要求だけ省電力を外す(requestWithRetry)
     Function("advertise") { name: String ->
@@ -457,7 +459,7 @@ class NearbyLinkModule : Module() {
     Function("requestConnect") { endpointId: String, name: String ->
       // endpoint ごとに 1 つだけ進行中。進行中なら新しく出さない(JS の onFound 重複・探索やり直しとの二重呼び出しを止める)
       if (inFlight.add(endpointId)) requestWithRetry(endpointId, name, 0)
-      else android.util.Log.i("DH-NEARBY", "requestConnect skipped: already in flight ep=$endpointId")
+      else DhLog.i("DH-NEARBY", "requestConnect skipped: already in flight ep=$endpointId")
     }
     Function("accept") { endpointId: String -> client.acceptConnection(endpointId, payloads) }
     Function("reject") { endpointId: String -> client.rejectConnection(endpointId) }

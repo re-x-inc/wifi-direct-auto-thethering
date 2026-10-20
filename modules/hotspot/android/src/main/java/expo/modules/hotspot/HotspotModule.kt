@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 private const val TAG = "DH-P2P"
 /** 子機の参加を待つ時間。初回は利用者が「接続」を押すまで待つので長めにする。ダイアログが出ている間に取り下げない */
-private const val JOIN_TIMEOUT_MS = 60_000L
+private const val JOIN_TIMEOUT_MS = 180_000L
 private const val GROUP_READY_MS = 15_000L
 /** group ready のあと、ビーコンが出始めるまで待ってから子機が join を始める時間(試験で比べるため 1 か所。0 で待たない) */
 private const val JOIN_START_DELAY_MS = 2_500L
@@ -63,7 +63,9 @@ class HotspotModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("Hotspot")
-    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt")
+    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "log")
+    OnCreate { DhLog.sink = { tag, line -> sendEvent("log", mapOf("tag" to tag, "line" to line)) } }
+    OnDestroy { DhLog.sink = null }
 
     // ---- 親機 ----
     AsyncFunction("startHotspot") { promise: Promise ->
@@ -104,7 +106,7 @@ class HotspotModule : Module() {
      * Wi-Fi Direct グループを、固定の名前・パスフレーズで作る(LocalOnlyHotspot が使えない端末向けの代替)。
      * 作成したグループには、子機が通常の Wi-Fi(WPA2)として joinWifi で参加できる。
      */
-    AsyncFunction("startDirect") { fixedName: String?, fixedPass: String?, freq: Int?, promise: Promise ->
+    AsyncFunction("startDirect") { fixedName: String?, fixedPass: String?, freq: Int?, bandHint: String?, why: String?, promise: Promise ->
       val m = ctx.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
       val ch = m.initialize(ctx, Looper.getMainLooper(), null)
       p2p = m; p2pCh = ch
@@ -114,15 +116,36 @@ class HotspotModule : Module() {
       val name = fixedName ?: ("DIRECT-dh-" + rnd(4))
       val pass = fixedPass ?: rnd(12)
       val b = WifiP2pConfig.Builder().setNetworkName(name).setPassphrase(pass).enablePersistentMode(false)
-      // 帯域は 2.4GHz に固定する(子機が見つけやすい)。2.4GHz の周波数が渡されたときはそのチャンネルに、それ以外は 2.4GHz 帯の自動選択にする
+      // 帯域・周波数の決め方(呼び出し側の候補順に 1 回ずつ試す。失敗は JS 側が次の候補へ進める):
+      //  - freq が 2.4/5GHz 帯の MHz のとき: そのチャンネルに固定(親機の Wi-Fi と同じチャンネル = 時分割なし)。API 29+ (setGroupOperatingFrequency)
+      //  - bandHint = "5": 5GHz 帯の自動選択(setGroupOperatingBand)。API 29+ かつ 5GHz 対応の端末のみ
+      //  - それ以外: 2.4GHz 帯の自動選択(従来どおり)
+      // いずれも createGroup と同じ権限(NEARBY_WIFI_DEVICES / ACCESS_FINE_LOCATION)で足りる。API 28 以下は帯域指定なし
       var band = "none"
+      val staMhz = runCatching {
+        @Suppress("DEPRECATION") val i = (ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager).connectionInfo
+        if (i != null && i.networkId != -1) i.frequency else 0
+      }.getOrDefault(0)
       if (Build.VERSION.SDK_INT >= 29) {
-        if (freq != null && freq in 2400..2500) { b.setGroupOperatingFrequency(freq); band = "2.4GHz/${freq}MHz" }
-        else { b.setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ); band = "2.4GHz/auto" }
+        val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val has5 = runCatching { wm.is5GHzBandSupported }.getOrDefault(true)
+        try {
+          if (freq != null && freq in 2400..2500) { b.setGroupOperatingFrequency(freq); band = "2.4GHz/${freq}MHz" }
+          else if (freq != null && freq in 4900..5900) {
+            if (!has5) { promise.reject("E_BAND", "5GHz 非対応の端末です(freq=$freq)", null); return@AsyncFunction }
+            b.setGroupOperatingFrequency(freq); band = "5GHz/${freq}MHz"
+          } else if (bandHint == "5") {
+            if (!has5) { promise.reject("E_BAND", "5GHz 非対応の端末です", null); return@AsyncFunction }
+            b.setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ); band = "5GHz/auto"
+          } else { b.setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ); band = "2.4GHz/auto" }
+        } catch (e: Exception) {
+          DhLog.w(TAG, "startDirect band setup failed freq=$freq hint=$bandHint $e -> 帯域指定なしで作る")
+          band = "none(setup failed)"
+        }
       }
       val cfg = b.build()
       // パスフレーズは出さない
-      Log.i(TAG, "startDirect ssid=$name passLen=${pass.length} passTag=${passTag(pass)} band=$band(requested freq=${freq ?: 0})")
+      DhLog.i(TAG, "startDirect ssid=$name passLen=${pass.length} passTag=${passTag(pass)} band=$band(requested freq=${freq ?: 0} hint=${bandHint ?: "-"}) staMHz=$staMhz sdk=${Build.VERSION.SDK_INT} why=${why ?: "-"}")
       // 以前のグループが残っていれば消してから作る(BUSY のときは段階的に片付ける。手順と結果は DH-P2P のログ)
       clearThenCreate(m, ch, cfg, name, pass, promise)
     }
@@ -242,7 +265,7 @@ class HotspotModule : Module() {
       }
       // 同じ SSID への参加が進行中なら、新しく requestNetwork を出さず、その結果を待つ(二重要求でダイアログが固まるのを防ぐ)
       if (joinPending == ssid) {
-        Log.i(TAG, "joinWifi already in progress ssid=$ssid -> wait (no new requestNetwork)")
+        DhLog.i(TAG, "joinWifi already in progress ssid=$ssid -> wait (no new requestNetwork)")
         joinWaiters.add(promise)
         return@AsyncFunction
       }
@@ -250,7 +273,7 @@ class HotspotModule : Module() {
       joinPending = ssid
       joinWaiters.clear()
       joinWaiters.add(promise)
-      Log.i(TAG, "joinWifi accepted ssid=$ssid ssidBytes=${ssid.toByteArray(Charsets.UTF_8).size} passLen=${pass.length} passTag=${passTag(pass)} security=WPA2-PSK startDelay=${JOIN_START_DELAY_MS}ms")
+      DhLog.i(TAG, "joinWifi accepted ssid=$ssid ssidBytes=${ssid.toByteArray(Charsets.UTF_8).size} passLen=${pass.length} passTag=${passTag(pass)} security=WPA2-PSK startDelay=${JOIN_START_DELAY_MS}ms")
       logScan(ssid, "before-join", true)
       if (JOIN_START_DELAY_MS > 0) mainHandler.postDelayed({ if (joinPending == ssid) startJoin(ssid, pass, 1) }, JOIN_START_DELAY_MS)
       else startJoin(ssid, pass, 1)
@@ -302,7 +325,7 @@ class HotspotModule : Module() {
         .setIsAppInteractionRequired(false).setIsMetered(false).build()
       suggestions = listOf(sg)
       val st = wm.addNetworkSuggestions(suggestions)
-      android.util.Log.i("DH-SUGGEST", "addNetworkSuggestions status=$st ssid=$ssid")
+      DhLog.i("DH-SUGGEST", "addNetworkSuggestions status=$st ssid=$ssid")
       // 0=SUCCESS。4=ERROR_APP_DISALLOWED(ユーザーが未許可)。5=DUPLICATE は差し替え済みなので続行
       if (st != WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS && st != WifiManager.STATUS_NETWORK_SUGGESTIONS_ERROR_ADD_DUPLICATE) {
         promise.reject("E_SUGGEST", "addNetworkSuggestions status=$st", null); return@AsyncFunction
@@ -373,7 +396,7 @@ class HotspotModule : Module() {
   private fun logScan(ssid: String, why: String, kick: Boolean) {
     try {
       val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-      if (kick) Log.i(TAG, "scan[$why] startScan=${wm.startScan()} (制限により false のことがある)")
+      if (kick) DhLog.i(TAG, "scan[$why] startScan=${wm.startScan()} (制限により false のことがある)")
       val all = wm.scanResults
       val hit = all.filter { r ->
         val n = if (Build.VERSION.SDK_INT >= 33) r.wifiSsid?.toString()?.trim('"') else r.SSID
@@ -381,12 +404,12 @@ class HotspotModule : Module() {
       }
       if (hit.isEmpty()) {
         val directs = all.filter { (if (Build.VERSION.SDK_INT >= 33) r2s(it) else it.SSID).startsWith("DIRECT-") }
-        Log.w(TAG, "scan[$why] ssid=$ssid 見つからない total=${all.size} DIRECT-*=${directs.map { (if (Build.VERSION.SDK_INT >= 33) r2s(it) else it.SSID) + "@" + it.frequency }}")
+        DhLog.w(TAG, "scan[$why] ssid=$ssid 見つからない total=${all.size} DIRECT-*=${directs.map { (if (Build.VERSION.SDK_INT >= 33) r2s(it) else it.SSID) + "@" + it.frequency }}")
       } else hit.forEach { r ->
-        Log.i(TAG, "scan[$why] ssid=$ssid 見えている bssid=${r.BSSID} freq=${r.frequency} rssi=${r.level} caps=${r.capabilities} ageMs=${(android.os.SystemClock.elapsedRealtime() - r.timestamp / 1000)}")
+        DhLog.i(TAG, "scan[$why] ssid=$ssid 見えている bssid=${r.BSSID} freq=${r.frequency} rssi=${r.level} caps=${r.capabilities} ageMs=${(android.os.SystemClock.elapsedRealtime() - r.timestamp / 1000)}")
       }
     } catch (e: Exception) {
-      Log.w(TAG, "scan[$why] failed $e (位置情報/NEARBY_WIFI_DEVICES の権限?)")
+      DhLog.w(TAG, "scan[$why] failed $e (位置情報/NEARBY_WIFI_DEVICES の権限?)")
     }
   }
   @Suppress("NewApi")
@@ -411,41 +434,41 @@ class HotspotModule : Module() {
     try {
       m.requestGroupInfo(ch) { g ->
         if (g == null) {
-          Log.i(TAG, "no existing group -> skip removeGroup/cleanup")
+          DhLog.i(TAG, "no existing group -> skip removeGroup/cleanup")
           create(m, ch, cfg, name, pass, promise, 0)
         } else {
-          Log.i(TAG, "existing group ssid=${g.networkName} isGO=${g.isGroupOwner} -> removeGroup")
+          DhLog.i(TAG, "existing group ssid=${g.networkName} isGO=${g.isGroupOwner} -> removeGroup")
           removeExisting(m, ch, cfg, name, pass, promise)
         }
       }
     } catch (e: Exception) {
-      Log.w(TAG, "requestGroupInfo before create failed $e -> removeGroup")
+      DhLog.w(TAG, "requestGroupInfo before create failed $e -> removeGroup")
       removeExisting(m, ch, cfg, name, pass, promise)
     }
   }
 
   private fun removeExisting(m: WifiP2pManager, ch: WifiP2pManager.Channel, cfg: WifiP2pConfig, name: String, pass: String, promise: Promise) {
     m.removeGroup(ch, object : WifiP2pManager.ActionListener {
-      override fun onSuccess() { Log.i(TAG, "removeGroup ok"); create(m, ch, cfg, name, pass, promise, 0) }
+      override fun onSuccess() { DhLog.i(TAG, "removeGroup ok"); create(m, ch, cfg, name, pass, promise, 0) }
       override fun onFailure(reason: Int) {
-        Log.i(TAG, "removeGroup failed reason=${reasonName(reason)} (group はあるのに BUSY: 片付けを試す)")
+        DhLog.i(TAG, "removeGroup failed reason=${reasonName(reason)} (group はあるのに BUSY: 片付けを試す)")
         if (reason != WifiP2pManager.BUSY) { create(m, ch, cfg, name, pass, promise, 0); return }
-        Log.i(TAG, "cleanup step1: cancelConnect + stopPeerDiscovery")
+        DhLog.i(TAG, "cleanup step1: cancelConnect + stopPeerDiscovery")
         runCatching { m.cancelConnect(ch, null) }
         runCatching { m.stopPeerDiscovery(ch, null) }
         mainHandler.postDelayed({
           m.removeGroup(ch, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() { Log.i(TAG, "cleanup step1 removeGroup ok"); create(m, ch, cfg, name, pass, promise, 0) }
+            override fun onSuccess() { DhLog.i(TAG, "cleanup step1 removeGroup ok"); create(m, ch, cfg, name, pass, promise, 0) }
             override fun onFailure(r2: Int) {
-              Log.w(TAG, "cleanup step1 removeGroup still failed reason=${reasonName(r2)} -> step2: delete persistent groups + re-initialize channel")
+              DhLog.w(TAG, "cleanup step1 removeGroup still failed reason=${reasonName(r2)} -> step2: delete persistent groups + re-initialize channel")
               deletePersistentGroups(m, ch)
               closeChannel(ch)
               val ch2 = m.initialize(ctx, Looper.getMainLooper(), null)
               p2pCh = ch2
               mainHandler.postDelayed({
                 m.removeGroup(ch2, object : WifiP2pManager.ActionListener {
-                  override fun onSuccess() { Log.i(TAG, "cleanup step2 removeGroup ok"); create(m, ch2, cfg, name, pass, promise, 0) }
-                  override fun onFailure(r3: Int) { Log.w(TAG, "cleanup step2 removeGroup reason=${reasonName(r3)} -> createGroup anyway"); create(m, ch2, cfg, name, pass, promise, 0) }
+                  override fun onSuccess() { DhLog.i(TAG, "cleanup step2 removeGroup ok"); create(m, ch2, cfg, name, pass, promise, 0) }
+                  override fun onFailure(r3: Int) { DhLog.w(TAG, "cleanup step2 removeGroup reason=${reasonName(r3)} -> createGroup anyway"); create(m, ch2, cfg, name, pass, promise, 0) }
                 })
               }, 500L)
             }
@@ -458,9 +481,9 @@ class HotspotModule : Module() {
   /** 記憶された persistent group を消す(公開 API が無いので reflection。無い/失敗は無視) */
   private fun deletePersistentGroups(m: WifiP2pManager, ch: WifiP2pManager.Channel) {
     val method = runCatching { WifiP2pManager::class.java.getMethod("deletePersistentGroup", WifiP2pManager.Channel::class.java, Int::class.javaPrimitiveType, WifiP2pManager.ActionListener::class.java) }.getOrNull()
-    if (method == null) { Log.i(TAG, "deletePersistentGroup unavailable"); return }
+    if (method == null) { DhLog.i(TAG, "deletePersistentGroup unavailable"); return }
     for (id in 0..7) runCatching { method.invoke(m, ch, id, null) }
-    Log.i(TAG, "deletePersistentGroup requested for netId 0..7")
+    DhLog.i(TAG, "deletePersistentGroup requested for netId 0..7")
   }
 
   /** UDP ASSOCIATE の自己診断: 8.8.8.8 へ DNS(example.com の A)を引いて、応答が返れば true */
@@ -493,11 +516,11 @@ class HotspotModule : Module() {
       m.createGroup(ch, cfg, object : WifiP2pManager.ActionListener {
         override fun onSuccess() {
           // ok は「要求が受け付けられた」だけ。group が実際にできる(GO になる)まで待ってから返す
-          Log.i(TAG, "createGroup accepted ssid=$name -> wait for group formed (max ${GROUP_READY_MS}ms)")
+          DhLog.i(TAG, "createGroup accepted ssid=$name -> wait for group formed (max ${GROUP_READY_MS}ms)")
           waitGroupReady(m, ch, name, pass, promise, android.os.SystemClock.elapsedRealtime() + GROUP_READY_MS, 0)
         }
         override fun onFailure(reason: Int) {
-          Log.w(TAG, "createGroup failed ssid=$name reason=${reasonName(reason)} retry=$retry")
+          DhLog.w(TAG, "createGroup failed ssid=$name reason=${reasonName(reason)} retry=$retry")
           if (reason == WifiP2pManager.BUSY && retry < 1) {
             runCatching { m.cancelConnect(ch, null) }
             runCatching { m.stopPeerDiscovery(ch, null) }
@@ -512,7 +535,7 @@ class HotspotModule : Module() {
         }
       })
     } catch (e: Exception) {
-      Log.w(TAG, "createGroup exception ssid=$name $e")
+      DhLog.w(TAG, "createGroup exception ssid=$name $e")
       promise.reject("E_DIRECT", e.message ?: e.toString(), e)
     }
   }
@@ -525,11 +548,11 @@ class HotspotModule : Module() {
         val ok = g != null && g.isGroupOwner && g.networkName == want
         val now = android.os.SystemClock.elapsedRealtime()
         if (ok) {
-          Log.i(TAG, "group ready ssid=$want after ${n * 500}ms (polls=${n + 1})")
+          DhLog.i(TAG, "group ready ssid=$want after ${n * 500}ms (polls=${n + 1})")
           logGroup(m, ch, want)
           promise.resolve(mapOf("ssid" to want, "passphrase" to pass))
         } else if (now < deadline) {
-          if (n % 4 == 0) Log.i(TAG, "waiting group: info=${if (g == null) "null" else "ssid=${g.networkName} isGO=${g.isGroupOwner}"} poll=$n")
+          if (n % 4 == 0) DhLog.i(TAG, "waiting group: info=${if (g == null) "null" else "ssid=${g.networkName} isGO=${g.isGroupOwner}"} poll=$n")
           mainHandler.postDelayed({ waitGroupReady(m, ch, want, pass, promise, deadline, n + 1) }, 500L)
         } else {
           val why = when {
@@ -537,14 +560,14 @@ class HotspotModule : Module() {
             !g.isGroupOwner -> "GO になっていない(ssid=${g.networkName})"
             else -> "SSID 不一致 got=${g.networkName} want=$want"
           }
-          Log.w(TAG, "group NOT ready after ${GROUP_READY_MS}ms: $why")
+          DhLog.w(TAG, "group NOT ready after ${GROUP_READY_MS}ms: $why")
           // 半端な状態を残さない
           m.removeGroup(ch, null)
           promise.reject("E_DIRECT", "group not formed within ${GROUP_READY_MS / 1000}s: $why", null)
         }
       }
     } catch (e: Exception) {
-      Log.w(TAG, "requestGroupInfo exception $e")
+      DhLog.w(TAG, "requestGroupInfo exception $e")
       promise.reject("E_DIRECT", "requestGroupInfo: ${e.message ?: e}", e)
     }
   }
@@ -554,15 +577,15 @@ class HotspotModule : Module() {
   private fun logGroup(m: WifiP2pManager, ch: WifiP2pManager.Channel, want: String) {
     try {
       m.requestGroupInfo(ch) { g ->
-        if (g == null) { Log.w(TAG, "requestGroupInfo null (グループ情報なし) want=$want"); return@requestGroupInfo }
+        if (g == null) { DhLog.w(TAG, "requestGroupInfo null (グループ情報なし) want=$want"); return@requestGroupInfo }
         val freq = runCatching { g.javaClass.getMethod("getFrequency").invoke(g) as Int }.getOrNull() // API 36+
-        Log.i(TAG, "groupInfo ssid=${g.networkName} match=${g.networkName == want} isGO=${g.isGroupOwner} freq=${freq ?: "n/a"} iface=${g.`interface`} clients=${g.clientList.size}")
+        DhLog.i(TAG, "groupInfo ssid=${g.networkName} match=${g.networkName == want} isGO=${g.isGroupOwner} freq=${freq ?: "n/a"} iface=${g.`interface`} clients=${g.clientList.size}")
       }
       m.requestConnectionInfo(ch) { i ->
-        Log.i(TAG, "connectionInfo formed=${i?.groupFormed} isGO=${i?.isGroupOwner} goAddr=${i?.groupOwnerAddress?.hostAddress}")
+        DhLog.i(TAG, "connectionInfo formed=${i?.groupFormed} isGO=${i?.isGroupOwner} goAddr=${i?.groupOwnerAddress?.hostAddress}")
       }
     } catch (e: Exception) {
-      Log.w(TAG, "groupInfo failed $e")
+      DhLog.w(TAG, "groupInfo failed $e")
     }
   }
 
@@ -573,7 +596,13 @@ class HotspotModule : Module() {
   /** 参加を 1 回試す。JOIN_TIMEOUT_MS で見つからなければ要求を取り下げ(ダイアログを残さない)、1 回だけやり直す */
   private fun startJoin(ssid: String, pass: String, attempt: Int) {
     val gen = ++joinGen
-    val spec = WifiNetworkSpecifier.Builder().setSsid(ssid).setWpa2Passphrase(pass).build()
+    val sb = WifiNetworkSpecifier.Builder().setSsid(ssid).setWpa2Passphrase(pass)
+    // 親機の GO は 2.4GHz 固定。子機の探索も 2.4GHz に絞り、5GHz/DFS のオフチャンネルスキャンに時間を取られないようにする(API 33+。非対応・失敗時は指定なし)
+    if (Build.VERSION.SDK_INT >= 33) {
+      try { sb.setBand(android.net.wifi.ScanResult.WIFI_BAND_24_GHZ); DhLog.i(TAG, "joinWifi scan band=2.4GHz only") }
+      catch (e: Throwable) { DhLog.w(TAG, "joinWifi setBand(2.4GHz) failed $e -> 帯域指定なし") }
+    } else DhLog.i(TAG, "joinWifi scan band=指定なし(API<33 は WifiNetworkSpecifier.setBand 不可)")
+    val spec = sb.build()
     val req = NetworkRequest.Builder()
       .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
       .setNetworkSpecifier(spec)
@@ -582,19 +611,19 @@ class HotspotModule : Module() {
     val cb = object : ConnectivityManager.NetworkCallback() {
       override fun onAvailable(n: Network) {
         if (gen != joinGen) return
-        Log.i(TAG, "join available ssid=$ssid attempt=$attempt")
+        DhLog.i(TAG, "join available ssid=$ssid attempt=$attempt")
         joined = n
       }
       override fun onLinkPropertiesChanged(n: Network, lp: LinkProperties) {
         if (gen != joinGen) return
         val gw = gatewayOf(lp) ?: return
         joinedGw = gw
-        Log.i(TAG, "join ok ssid=$ssid gw=$gw attempt=$attempt")
+        DhLog.i(TAG, "join ok ssid=$ssid gw=$gw attempt=$attempt")
         finishJoin("ok", null, gw)
       }
       override fun onUnavailable() {
         if (gen != joinGen) return
-        Log.w(TAG, "join unavailable ssid=$ssid attempt=$attempt (拒否または見つからない)")
+        DhLog.w(TAG, "join unavailable ssid=$ssid attempt=$attempt (拒否または見つからない)")
         finishJoin("declined", "network unavailable (timeout or user declined)")
       }
       override fun onLost(n: Network) {
@@ -603,7 +632,7 @@ class HotspotModule : Module() {
       }
     }
     netCb = cb
-    Log.i(TAG, "joinWifi requestNetwork ssid=$ssid (1 回だけ) timeout=${JOIN_TIMEOUT_MS}ms")
+    DhLog.i(TAG, "joinWifi requestNetwork ssid=$ssid (1 回だけ) timeout=${JOIN_TIMEOUT_MS}ms")
     sendEvent("onJoinPrompt", mapOf("ssid" to ssid, "phase" to "show", "timeoutMs" to JOIN_TIMEOUT_MS))
     cm.requestNetwork(req, cb)
     joinTimeout = Runnable {
@@ -611,7 +640,7 @@ class HotspotModule : Module() {
       logScan(ssid, "timeout", false)
       runCatching { cm.unregisterNetworkCallback(cb) } // 取り下げて、承認ダイアログを残さない
       if (netCb === cb) netCb = null
-      Log.w(TAG, "join timeout ssid=$ssid after ${JOIN_TIMEOUT_MS}ms -> give up (やり直しは呼び出し側)")
+      DhLog.w(TAG, "join timeout ssid=$ssid after ${JOIN_TIMEOUT_MS}ms -> give up (やり直しは呼び出し側)")
       finishJoin("timeout", "network not found or not approved within ${JOIN_TIMEOUT_MS / 1000}s")
     }
     mainHandler.postDelayed(joinTimeout!!, JOIN_TIMEOUT_MS)

@@ -1,5 +1,5 @@
 import { createLink } from '../link/session';
-import { directCreds } from '../pairing/directCreds';
+import { directCreds, removeDirectCreds } from '../pairing/directCreds';
 import type { LinkSupervisor } from '../link/supervisor';
 import { Confirm, Found, PairingResult, PairingSession } from '../pairing/pairing';
 import { getIdentity, PairStore } from '../pairing/store';
@@ -92,6 +92,8 @@ export class Tether {
 
   constructor(private p: TetherPlatform, private cfg: TetherConfig = {}) {
     this.store = new PairStore(p.kv);
+    // ネイティブのログ(SSID・合言葉は伏せ済み)も診断ログに流す。形: "[DH-P2P] i 本文"
+    try { p.onNativeLog?.((tag, line) => this.log(`[${tag}] ${line}`)); } catch {}
     this.state = {
       started: false, role: null, autoRole: this.detectRole(), peer: null,
       link: 'stopped', attempt: 0,
@@ -246,6 +248,7 @@ export class Tether {
   async removePair(peerId: string): Promise<void> {
     await this.store.remove(peerId);
     await removePeerData(this.p.kv, peerId).catch(() => {});
+    await removeDirectCreds(this.p.kv, peerId).catch(() => {});
     if (this.peerId === peerId) this.stop();
   }
 
@@ -732,17 +735,21 @@ export class Tether {
     const { ssid: name, pass } = await directCreds({ hmac: (s, d) => this.p.nearby.hmac(s, d), kv: this.p.kv, selfId: self.id, peerId, secret });
     // チャンネルは動的に決める: まずシステム任せ(周囲と親機の Wi-Fi を見て OS が選ぶ)、だめなら親機の Wi-Fi と同じ周波数。
     const staFreq = safeFreq(h);
-    for (const freq of pickDirectFrequencies(staFreq)) {
+    const plans = pickDirectPlans(staFreq);
+    this.log(`Wi-Fi Direct の帯域候補: 親機 Wi-Fi=${staFreq || '未接続'}MHz → ${plans.map((x) => describePlan(x)).join(' → ')}`);
+    for (const plan of plans) {
+      const freq = plan.freq;
+      this.log(`Wi-Fi Direct 帯域を選択: ${describePlan(plan)}(理由: ${plan.reason})`);
       try {
         const t0 = this.p.now();
-        const cred = await h.startDirect(name, pass, freq);
-        this.log(`Wi-Fi Direct 成功(${this.p.now() - t0}ms, ${freq ? freq + 'MHz' : 'ch自動'})`);
+        const cred = await h.startDirect(name, pass, freq, plan.band, plan.reason);
+        this.log(`Wi-Fi Direct 成功(${this.p.now() - t0}ms, ${describePlan(plan)})`);
         void this.record('WifiDirect', 'create', true);
         // 親機が Wi-Fi に接続したまま Direct を作れた = STA+P2P の同時動作を観測
         if (staFreq > 0) void this.observe('staP2pConcurrent', true);
         return { kind: 'tether.wifi', method: 'WifiDirect', ssid: cred.ssid, pass: cred.passphrase, port: ECHO_PORT, socks };
       } catch (e: any) {
-        this.log(`Wi-Fi Direct 失敗(${freq ?? '自動'}): ${e?.message ?? e}`);
+        this.log(`Wi-Fi Direct 失敗(${describePlan(plan)}): ${e?.message ?? e} → 次の候補へ`);
         if (gen !== this.gen) return null;
       }
     }
@@ -944,9 +951,30 @@ const safeFreq = (h: { wifiFrequency(): number }): number => {
   try { return h.wifiFrequency(); } catch { return 0; }
 };
 
-/** Direct を作るチャンネル(MHz)の候補を、優先順に返す。null = システム任せ。sta = 親機の Wi-Fi の周波数(未接続は 0) */
-export function pickDirectFrequencies(sta: number): (number | null)[] {
-  const dfs = sta >= 5260 && sta <= 5720; // DFS 帯ではグループオーナーになれない
-  const usable = (sta >= 2412 && sta <= 2472) || (sta >= 5170 && sta <= 5825 && !dfs);
-  return usable ? [null, sta] : [null];
+export interface DirectPlan {
+  /** 固定する周波数(MHz)。null = 帯域内の自動選択 */
+  freq: number | null;
+  band: '2.4' | '5';
+  reason: string;
+}
+const describePlan = (p: DirectPlan) => (p.freq ? `${p.band}GHz/${p.freq}MHz` : `${p.band}GHz/自動`);
+
+/** 屋外(車・バイク)で使うため GO は 2.4GHz 固定。5GHz は DFS(W53/W56)の制約があるので候補にしない */
+const GO_CHANNELS_24 = [2412, 2437, 2462];
+
+/**
+ * Direct(GO)を作る周波数の候補を、優先順に返す。sta = 親機の Wi-Fi の周波数(未接続は 0)。
+ * 既定は 2.4GHz の 1/6/11ch を順に。親機の STA が 2.4GHz のときだけ、そのチャンネルを先頭にして時分割(MCC)を避ける。
+ * 最後に 2.4GHz 自動を置く(それでも 2.4GHz)。5GHz は使わない。
+ */
+export function pickDirectPlans(sta: number): DirectPlan[] {
+  const plans: DirectPlan[] = [];
+  const sta24 = sta >= 2412 && sta <= 2484;
+  if (sta24) plans.push({ freq: sta, band: '2.4', reason: `親機の Wi-Fi(${sta}MHz)と同じ 2.4GHz チャンネルに合わせる` });
+  for (const f of GO_CHANNELS_24) {
+    if (f === sta) continue;
+    plans.push({ freq: f, band: '2.4', reason: sta24 ? `STA と同チャンネルが不可: 2.4GHz ${f}MHz` : sta > 0 ? `親機の Wi-Fi は ${sta}MHz(2.4GHz 以外): GO は屋外向けに 2.4GHz 固定、${f}MHz を試す` : `親機が Wi-Fi 未接続: 2.4GHz ${f}MHz を試す` });
+  }
+  plans.push({ freq: null, band: '2.4', reason: '指定チャンネルがすべて不可: 2.4GHz 自動(従来どおり)' });
+  return plans;
 }

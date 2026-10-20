@@ -1,6 +1,8 @@
 import { NativeModule, requireNativeModule } from 'expo';
 
 type Events = {
+  /** ネイティブのログ(DH-NEARBY)。SSID・端末名は伏せ済み。line は "i|w 本文" */
+  log(e: { tag: string; line: string }): void;
   onFound(e: { endpointId: string; name: string }): void;
   onLost(e: { endpointId: string }): void;
   onInitiated(e: { endpointId: string; name: string; digits: string; incoming: boolean }): void;
