@@ -14,6 +14,7 @@ import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
 import android.os.Handler
+import android.util.Log
 import android.os.Looper
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
@@ -27,6 +28,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * M1: 親機が LocalOnlyHotspot を起動し、子機が接続情報(Nearby 経由で受領)で参加して、
  * 親機のポートへ TCP で到達できるかを確かめる。インターネット共有そのものは M2 以降(SOCKS5 / VPN)。
  */
+private const val TAG = "DH-P2P"
+/** 子機の参加を待つ時間。初回は利用者が「接続」を押すまで待つので長めにする。ダイアログが出ている間に取り下げない */
+private const val JOIN_TIMEOUT_MS = 60_000L
+private const val GROUP_READY_MS = 15_000L
+/** group ready のあと、ビーコンが出始めるまで待ってから子機が join を始める時間(試験で比べるため 1 か所。0 で待たない) */
+private const val JOIN_START_DELAY_MS = 2_500L
+
 class HotspotModule : Module() {
   private var reservation: WifiManager.LocalOnlyHotspotReservation? = null
   private var netCb: ConnectivityManager.NetworkCallback? = null
@@ -41,13 +49,19 @@ class HotspotModule : Module() {
   private var cellCb: ConnectivityManager.NetworkCallback? = null
   private var p2p: WifiP2pManager? = null
   private var p2pCh: WifiP2pManager.Channel? = null
+  // 子機の参加(joinWifi)の進行状態。二重要求を避け、時間切れで取り下げるため
+  private val mainHandler = Handler(Looper.getMainLooper())
+  private var joinPending: String? = null
+  private val joinWaiters = mutableListOf<Promise>()
+  private var joinGen = 0
+  private var joinTimeout: Runnable? = null
 
   private val ctx: Context get() = appContext.reactContext ?: error("no context")
   private val cm: ConnectivityManager get() = ctx.getSystemService(ConnectivityManager::class.java)
 
   override fun definition() = ModuleDefinition {
     Name("Hotspot")
-    Events("onHotspotStopped", "onWifiLost")
+    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt")
 
     // ---- 親機 ----
     AsyncFunction("startHotspot") { promise: Promise ->
@@ -83,17 +97,21 @@ class HotspotModule : Module() {
       p2p = m; p2pCh = ch
       val alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
       fun rnd(n: Int) = (1..n).map { alphabet[java.security.SecureRandom().nextInt(alphabet.length)] }.joinToString("")
-      // 固定値が渡されたときはそれを使う(子機の「常に許可」が効くかの実験用)。なければ毎回ランダム
+      // 固定値が渡されたときはそれを使う(子機の承認の記憶が効く)。なければ毎回ランダム
       val name = fixedName ?: ("DIRECT-dh-" + rnd(4))
       val pass = fixedPass ?: rnd(12)
       val b = WifiP2pConfig.Builder().setNetworkName(name).setPassphrase(pass).enablePersistentMode(false)
-      if (freq != null && Build.VERSION.SDK_INT >= 29) b.setGroupOperatingFrequency(freq)
+      // 帯域は 2.4GHz に固定する(子機が見つけやすい)。2.4GHz の周波数が渡されたときはそのチャンネルに、それ以外は 2.4GHz 帯の自動選択にする
+      var band = "none"
+      if (Build.VERSION.SDK_INT >= 29) {
+        if (freq != null && freq in 2400..2500) { b.setGroupOperatingFrequency(freq); band = "2.4GHz/${freq}MHz" }
+        else { b.setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ); band = "2.4GHz/auto" }
+      }
       val cfg = b.build()
-      // 以前のグループが残っていれば消してから作る
-      m.removeGroup(ch, object : WifiP2pManager.ActionListener {
-        override fun onSuccess() = create(m, ch, cfg, name, pass, promise)
-        override fun onFailure(reason: Int) = create(m, ch, cfg, name, pass, promise)
-      })
+      // パスフレーズは出さない
+      Log.i(TAG, "startDirect ssid=$name passLen=${pass.length} passTag=${passTag(pass)} band=$band(requested freq=${freq ?: 0})")
+      // 以前のグループが残っていれば消してから作る(BUSY のときは段階的に片付ける。手順と結果は DH-P2P のログ)
+      clearThenCreate(m, ch, cfg, name, pass, promise)
     }
     /**
      * グループを消し、P2P チャンネルも閉じる(閉じないと p2p0 が残り、LOHS の AP インターフェースを作れなくなる)。
@@ -209,31 +227,20 @@ class HotspotModule : Module() {
         promise.resolve(mapOf("gateway" to gw0, "reused" to true))
         return@AsyncFunction
       }
-      leave()
-      joinedSsid = ssid
-      val spec = WifiNetworkSpecifier.Builder().setSsid(ssid).setWpa2Passphrase(pass).build()
-      val req = NetworkRequest.Builder()
-        .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-        .setNetworkSpecifier(spec)
-        .build()
-      val done = AtomicBoolean(false)
-      val cb = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(n: Network) { joined = n }
-        override fun onLinkPropertiesChanged(n: Network, lp: LinkProperties) {
-          val gw = gatewayOf(lp) ?: return
-          joinedGw = gw
-          if (done.compareAndSet(false, true)) promise.resolve(mapOf("gateway" to gw))
-        }
-        override fun onUnavailable() {
-          if (done.compareAndSet(false, true)) promise.reject("E_JOIN", "network unavailable (timeout or user declined)", null)
-        }
-        override fun onLost(n: Network) {
-          if (joined == n) { joined = null; joinedGw = null; joinedSsid = null; cm.bindProcessToNetwork(null) }
-          sendEvent("onWifiLost", emptyMap<String, Any>())
-        }
+      // 同じ SSID への参加が進行中なら、新しく requestNetwork を出さず、その結果を待つ(二重要求でダイアログが固まるのを防ぐ)
+      if (joinPending == ssid) {
+        Log.i(TAG, "joinWifi already in progress ssid=$ssid -> wait (no new requestNetwork)")
+        joinWaiters.add(promise)
+        return@AsyncFunction
       }
-      netCb = cb
-      cm.requestNetwork(req, cb, 60_000)
+      leave()
+      joinPending = ssid
+      joinWaiters.clear()
+      joinWaiters.add(promise)
+      Log.i(TAG, "joinWifi accepted ssid=$ssid ssidBytes=${ssid.toByteArray(Charsets.UTF_8).size} passLen=${pass.length} passTag=${passTag(pass)} security=WPA2-PSK startDelay=${JOIN_START_DELAY_MS}ms")
+      logScan(ssid, "before-join", true)
+      if (JOIN_START_DELAY_MS > 0) mainHandler.postDelayed({ if (joinPending == ssid) startJoin(ssid, pass, 1) }, JOIN_START_DELAY_MS)
+      else startJoin(ssid, pass, 1)
     }
     Function("leaveWifi") { leave() }
 
@@ -326,16 +333,180 @@ class HotspotModule : Module() {
     }
   }
 
-  private fun create(m: WifiP2pManager, ch: WifiP2pManager.Channel, cfg: WifiP2pConfig, name: String, pass: String, promise: Promise) {
+  /** 合言葉の突き合わせ用に、先頭 4 桁だけの SHA-256(合言葉そのものは出さない)。親機・子機で同じ値になるはず */
+  private fun passTag(pass: String): String =
+    java.security.MessageDigest.getInstance("SHA-256").digest(pass.toByteArray(Charsets.UTF_8)).take(2).joinToString("") { "%02x".format(it) }
+
+  /** 対象 SSID が子機の Wi-Fi スキャン結果に見えているか。見えなければ「見つからない」、見えていれば「認証・接続の失敗」と切り分ける */
+  @Suppress("DEPRECATION", "MissingPermission")
+  private fun logScan(ssid: String, why: String, kick: Boolean) {
+    try {
+      val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+      if (kick) Log.i(TAG, "scan[$why] startScan=${wm.startScan()} (制限により false のことがある)")
+      val all = wm.scanResults
+      val hit = all.filter { r ->
+        val n = if (Build.VERSION.SDK_INT >= 33) r.wifiSsid?.toString()?.trim('"') else r.SSID
+        n == ssid
+      }
+      if (hit.isEmpty()) {
+        val directs = all.filter { (if (Build.VERSION.SDK_INT >= 33) r2s(it) else it.SSID).startsWith("DIRECT-") }
+        Log.w(TAG, "scan[$why] ssid=$ssid 見つからない total=${all.size} DIRECT-*=${directs.map { (if (Build.VERSION.SDK_INT >= 33) r2s(it) else it.SSID) + "@" + it.frequency }}")
+      } else hit.forEach { r ->
+        Log.i(TAG, "scan[$why] ssid=$ssid 見えている bssid=${r.BSSID} freq=${r.frequency} rssi=${r.level} caps=${r.capabilities} ageMs=${(android.os.SystemClock.elapsedRealtime() - r.timestamp / 1000)}")
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "scan[$why] failed $e (位置情報/NEARBY_WIFI_DEVICES の権限?)")
+    }
+  }
+  @Suppress("NewApi")
+  private fun r2s(r: android.net.wifi.ScanResult): String = r.wifiSsid?.toString()?.trim('"') ?: ""
+
+  private fun reasonName(r: Int) = when (r) {
+    WifiP2pManager.ERROR -> "ERROR"
+    WifiP2pManager.P2P_UNSUPPORTED -> "P2P_UNSUPPORTED"
+    WifiP2pManager.BUSY -> "BUSY"
+    else -> "reason=$r"
+  }
+
+  /**
+   * 既存の group を消してから作る。removeGroup が BUSY のときは、
+   * (1) cancelConnect + stopPeerDiscovery → 1 秒待って removeGroup をやり直す
+   * (2) それでも BUSY なら persistent group を消し、チャンネルを作り直す
+   * ことを試してから createGroup する。
+   */
+  @Suppress("MissingPermission")
+  private fun clearThenCreate(m: WifiP2pManager, ch: WifiP2pManager.Channel, cfg: WifiP2pConfig, name: String, pass: String, promise: Promise) {
+    // group が無ければ removeGroup は BUSY になる(AOSP: InactiveState で REMOVE_GROUP を DefaultState が処理)。先に有無を見て、無ければ何もしない
+    try {
+      m.requestGroupInfo(ch) { g ->
+        if (g == null) {
+          Log.i(TAG, "no existing group -> skip removeGroup/cleanup")
+          create(m, ch, cfg, name, pass, promise, 0)
+        } else {
+          Log.i(TAG, "existing group ssid=${g.networkName} isGO=${g.isGroupOwner} -> removeGroup")
+          removeExisting(m, ch, cfg, name, pass, promise)
+        }
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "requestGroupInfo before create failed $e -> removeGroup")
+      removeExisting(m, ch, cfg, name, pass, promise)
+    }
+  }
+
+  private fun removeExisting(m: WifiP2pManager, ch: WifiP2pManager.Channel, cfg: WifiP2pConfig, name: String, pass: String, promise: Promise) {
+    m.removeGroup(ch, object : WifiP2pManager.ActionListener {
+      override fun onSuccess() { Log.i(TAG, "removeGroup ok"); create(m, ch, cfg, name, pass, promise, 0) }
+      override fun onFailure(reason: Int) {
+        Log.i(TAG, "removeGroup failed reason=${reasonName(reason)} (group はあるのに BUSY: 片付けを試す)")
+        if (reason != WifiP2pManager.BUSY) { create(m, ch, cfg, name, pass, promise, 0); return }
+        Log.i(TAG, "cleanup step1: cancelConnect + stopPeerDiscovery")
+        runCatching { m.cancelConnect(ch, null) }
+        runCatching { m.stopPeerDiscovery(ch, null) }
+        mainHandler.postDelayed({
+          m.removeGroup(ch, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() { Log.i(TAG, "cleanup step1 removeGroup ok"); create(m, ch, cfg, name, pass, promise, 0) }
+            override fun onFailure(r2: Int) {
+              Log.w(TAG, "cleanup step1 removeGroup still failed reason=${reasonName(r2)} -> step2: delete persistent groups + re-initialize channel")
+              deletePersistentGroups(m, ch)
+              closeChannel(ch)
+              val ch2 = m.initialize(ctx, Looper.getMainLooper(), null)
+              p2pCh = ch2
+              mainHandler.postDelayed({
+                m.removeGroup(ch2, object : WifiP2pManager.ActionListener {
+                  override fun onSuccess() { Log.i(TAG, "cleanup step2 removeGroup ok"); create(m, ch2, cfg, name, pass, promise, 0) }
+                  override fun onFailure(r3: Int) { Log.w(TAG, "cleanup step2 removeGroup reason=${reasonName(r3)} -> createGroup anyway"); create(m, ch2, cfg, name, pass, promise, 0) }
+                })
+              }, 500L)
+            }
+          })
+        }, 1_000L)
+      }
+    })
+  }
+
+  /** 記憶された persistent group を消す(公開 API が無いので reflection。無い/失敗は無視) */
+  private fun deletePersistentGroups(m: WifiP2pManager, ch: WifiP2pManager.Channel) {
+    val method = runCatching { WifiP2pManager::class.java.getMethod("deletePersistentGroup", WifiP2pManager.Channel::class.java, Int::class.javaPrimitiveType, WifiP2pManager.ActionListener::class.java) }.getOrNull()
+    if (method == null) { Log.i(TAG, "deletePersistentGroup unavailable"); return }
+    for (id in 0..7) runCatching { method.invoke(m, ch, id, null) }
+    Log.i(TAG, "deletePersistentGroup requested for netId 0..7")
+  }
+
+  private fun create(m: WifiP2pManager, ch: WifiP2pManager.Channel, cfg: WifiP2pConfig, name: String, pass: String, promise: Promise, retry: Int) {
     try {
       m.createGroup(ch, cfg, object : WifiP2pManager.ActionListener {
-        override fun onSuccess() { promise.resolve(mapOf("ssid" to name, "passphrase" to pass)) }
+        override fun onSuccess() {
+          // ok は「要求が受け付けられた」だけ。group が実際にできる(GO になる)まで待ってから返す
+          Log.i(TAG, "createGroup accepted ssid=$name -> wait for group formed (max ${GROUP_READY_MS}ms)")
+          waitGroupReady(m, ch, name, pass, promise, android.os.SystemClock.elapsedRealtime() + GROUP_READY_MS, 0)
+        }
         override fun onFailure(reason: Int) {
-          promise.reject("E_DIRECT", "createGroup failed: reason=$reason (0=ERROR 1=P2P_UNSUPPORTED 2=BUSY)", null)
+          Log.w(TAG, "createGroup failed ssid=$name reason=${reasonName(reason)} retry=$retry")
+          if (reason == WifiP2pManager.BUSY && retry < 1) {
+            runCatching { m.cancelConnect(ch, null) }
+            runCatching { m.stopPeerDiscovery(ch, null) }
+            m.removeGroup(ch, object : WifiP2pManager.ActionListener {
+              override fun onSuccess() = retryCreate()
+              override fun onFailure(r: Int) = retryCreate()
+              fun retryCreate() { mainHandler.postDelayed({ create(m, ch, cfg, name, pass, promise, retry + 1) }, 1_500L) }
+            })
+            return
+          }
+          promise.reject("E_DIRECT", "createGroup failed: reason=${reasonName(reason)}", null)
         }
       })
     } catch (e: Exception) {
+      Log.w(TAG, "createGroup exception ssid=$name $e")
       promise.reject("E_DIRECT", e.message ?: e.toString(), e)
+    }
+  }
+
+  /** requestGroupInfo を 500ms ごとに調べ、group が非 null・自分が GO・SSID 一致になったら準備完了として返す。期限までに揃わなければ失敗 */
+  @Suppress("MissingPermission")
+  private fun waitGroupReady(m: WifiP2pManager, ch: WifiP2pManager.Channel, want: String, pass: String, promise: Promise, deadline: Long, n: Int) {
+    try {
+      m.requestGroupInfo(ch) { g ->
+        val ok = g != null && g.isGroupOwner && g.networkName == want
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (ok) {
+          Log.i(TAG, "group ready ssid=$want after ${n * 500}ms (polls=${n + 1})")
+          logGroup(m, ch, want)
+          promise.resolve(mapOf("ssid" to want, "passphrase" to pass))
+        } else if (now < deadline) {
+          if (n % 4 == 0) Log.i(TAG, "waiting group: info=${if (g == null) "null" else "ssid=${g.networkName} isGO=${g.isGroupOwner}"} poll=$n")
+          mainHandler.postDelayed({ waitGroupReady(m, ch, want, pass, promise, deadline, n + 1) }, 500L)
+        } else {
+          val why = when {
+            g == null -> "formed=false のまま(requestGroupInfo null)"
+            !g.isGroupOwner -> "GO になっていない(ssid=${g.networkName})"
+            else -> "SSID 不一致 got=${g.networkName} want=$want"
+          }
+          Log.w(TAG, "group NOT ready after ${GROUP_READY_MS}ms: $why")
+          // 半端な状態を残さない
+          m.removeGroup(ch, null)
+          promise.reject("E_DIRECT", "group not formed within ${GROUP_READY_MS / 1000}s: $why", null)
+        }
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "requestGroupInfo exception $e")
+      promise.reject("E_DIRECT", "requestGroupInfo: ${e.message ?: e}", e)
+    }
+  }
+
+  /** 作ったグループの実際の SSID・周波数・GO アドレスをログに出す(合言葉は出さない) */
+  @Suppress("MissingPermission")
+  private fun logGroup(m: WifiP2pManager, ch: WifiP2pManager.Channel, want: String) {
+    try {
+      m.requestGroupInfo(ch) { g ->
+        if (g == null) { Log.w(TAG, "requestGroupInfo null (グループ情報なし) want=$want"); return@requestGroupInfo }
+        val freq = runCatching { g.javaClass.getMethod("getFrequency").invoke(g) as Int }.getOrNull() // API 36+
+        Log.i(TAG, "groupInfo ssid=${g.networkName} match=${g.networkName == want} isGO=${g.isGroupOwner} freq=${freq ?: "n/a"} iface=${g.`interface`} clients=${g.clientList.size}")
+      }
+      m.requestConnectionInfo(ch) { i ->
+        Log.i(TAG, "connectionInfo formed=${i?.groupFormed} isGO=${i?.isGroupOwner} goAddr=${i?.groupOwnerAddress?.hostAddress}")
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "groupInfo failed $e")
     }
   }
 
@@ -343,7 +514,70 @@ class HotspotModule : Module() {
     if (Build.VERSION.SDK_INT >= 27) runCatching { ch.close() }
   }
 
+  /** 参加を 1 回試す。JOIN_TIMEOUT_MS で見つからなければ要求を取り下げ(ダイアログを残さない)、1 回だけやり直す */
+  private fun startJoin(ssid: String, pass: String, attempt: Int) {
+    val gen = ++joinGen
+    val spec = WifiNetworkSpecifier.Builder().setSsid(ssid).setWpa2Passphrase(pass).build()
+    val req = NetworkRequest.Builder()
+      .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+      .setNetworkSpecifier(spec)
+      .build()
+    joinedSsid = ssid
+    val cb = object : ConnectivityManager.NetworkCallback() {
+      override fun onAvailable(n: Network) {
+        if (gen != joinGen) return
+        Log.i(TAG, "join available ssid=$ssid attempt=$attempt")
+        joined = n
+      }
+      override fun onLinkPropertiesChanged(n: Network, lp: LinkProperties) {
+        if (gen != joinGen) return
+        val gw = gatewayOf(lp) ?: return
+        joinedGw = gw
+        Log.i(TAG, "join ok ssid=$ssid gw=$gw attempt=$attempt")
+        finishJoin("ok", null, gw)
+      }
+      override fun onUnavailable() {
+        if (gen != joinGen) return
+        Log.w(TAG, "join unavailable ssid=$ssid attempt=$attempt (拒否または見つからない)")
+        finishJoin("declined", "network unavailable (timeout or user declined)")
+      }
+      override fun onLost(n: Network) {
+        if (gen == joinGen && joined == n) { joined = null; joinedGw = null; joinedSsid = null; cm.bindProcessToNetwork(null) }
+        sendEvent("onWifiLost", emptyMap<String, Any>())
+      }
+    }
+    netCb = cb
+    Log.i(TAG, "joinWifi requestNetwork ssid=$ssid (1 回だけ) timeout=${JOIN_TIMEOUT_MS}ms")
+    sendEvent("onJoinPrompt", mapOf("ssid" to ssid, "phase" to "show", "timeoutMs" to JOIN_TIMEOUT_MS))
+    cm.requestNetwork(req, cb)
+    joinTimeout = Runnable {
+      if (gen != joinGen || joinPending == null) return@Runnable
+      logScan(ssid, "timeout", false)
+      runCatching { cm.unregisterNetworkCallback(cb) } // 取り下げて、承認ダイアログを残さない
+      if (netCb === cb) netCb = null
+      Log.w(TAG, "join timeout ssid=$ssid after ${JOIN_TIMEOUT_MS}ms -> give up (やり直しは呼び出し側)")
+      finishJoin("timeout", "network not found or not approved within ${JOIN_TIMEOUT_MS / 1000}s")
+    }
+    mainHandler.postDelayed(joinTimeout!!, JOIN_TIMEOUT_MS)
+  }
+
+  private fun finishJoin(phase: String, error: String?, gw: String? = null) {
+    sendEvent("onJoinPrompt", mapOf("ssid" to (joinedSsid ?: ""), "phase" to phase))
+    joinTimeout?.let { mainHandler.removeCallbacks(it) }
+    joinTimeout = null
+    val ws = joinWaiters.toList()
+    joinWaiters.clear()
+    joinPending = null
+    for (w in ws) {
+      if (error == null) w.resolve(mapOf("gateway" to gw)) else w.reject("E_JOIN", error, null)
+    }
+  }
+
   private fun leave() {
+    joinTimeout?.let { mainHandler.removeCallbacks(it) }
+    joinTimeout = null
+    joinGen++
+    if (joinPending != null) finishJoin("cancelled", "cancelled")
     cm.bindProcessToNetwork(null)
     netCb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
     netCb = null

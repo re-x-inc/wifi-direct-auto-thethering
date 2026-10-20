@@ -18,6 +18,12 @@ export interface Options {
   random: () => number;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
+  /**
+   * つながっていた時間がこれ以上なら、切れたあと待たずにすぐ探索をやり直す(ms)。
+   * 待ちは setTimeout なので、アプリが背面にいる間(Wi-Fi 承認ダイアログが前面など)は React Native が止めてしまい、
+   * 再接続が始まらない。native のイベントで進む探索に、すぐ戻すため。短すぎる接続(つながってすぐ切れる)だけ待つ。
+   */
+  flapMs: number;
 }
 
 export interface SendOptions {
@@ -43,6 +49,7 @@ export const DEFAULTS: Options = {
   random: Math.random,
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   now: () => Date.now(),
+  flapMs: 3000,
 };
 
 /** 指数バックオフ + ジッター。attempt は 0 始まり。 */
@@ -115,11 +122,13 @@ export class LinkSupervisor {
       }
       attempt = 0;
       this.onState('connected', 0);
+      const upAt = this.o.now();
       await this.session(t);
       this.transport = null;
       if (this.running) {
         this.onState('waiting', 0);
-        await this.o.sleep(backoffMs(0, this.o));
+        // しばらくつながっていた後の切断は、待たずにすぐ探索をやり直す。つながってすぐ切れる場合だけ間をおく
+        if (this.o.now() - upAt < this.o.flapMs) await this.o.sleep(backoffMs(0, this.o));
       }
     }
     this.onState('stopped', 0);

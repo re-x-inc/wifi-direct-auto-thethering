@@ -142,3 +142,20 @@ test('圏外で送ったメッセージは、範囲に入った時点で1回だ�
   assert.equal(atGuest.filter((b: any) => b?.kind === 'wifi').length, 1);
   h.stop(); g.stop();
 });
+
+test('しばらくつながったあとの切断は、待ち(setTimeout)を挟まず探索をやり直す', async () => {
+  // 背面で React Native のタイマーが止まっても、native のイベントだけで再接続が進むことの確認(待ちが呼ばれないこと)
+  const { net, atGuest, mkHost } = setup();
+  let sleeps = 0;
+  const slow = { ...FAST, flapMs: 30, sleep: (ms: number) => { sleeps++; return wait(ms); } };
+  const g = createLink(net.guest, { role: 'guest', selfId: 'DH-GUEST', pair: { peerId: 'DH-HOST', secret: 's' }, connectTimeoutMs: 80 }, (b) => atGuest.push(b), slow);
+  const h = mkHost(); void h.run(); void g.run();
+  await until(() => net.connected);
+  await wait(60); // flapMs より長くつながっている
+  const before = sleeps;
+  net.drop();
+  h.send('again'); // 切断中に発生。再接続後に届く
+  await until(() => atGuest.length === 1);
+  assert.equal(sleeps, before, '子機は切断後に sleep を呼ばず再接続する');
+  h.stop(); g.stop();
+});
