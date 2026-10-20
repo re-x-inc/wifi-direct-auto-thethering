@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 private const val TAG = "DH-P2P"
 /** 子機の参加を待つ時間。初回は利用者が「接続」を押すまで待つので長めにする。ダイアログが出ている間に取り下げない */
-private const val JOIN_TIMEOUT_MS = 60_000L
+private const val JOIN_TIMEOUT_MS = 180_000L
 private const val GROUP_READY_MS = 15_000L
 /** group ready のあと、ビーコンが出始めるまで待ってから子機が join を始める時間(試験で比べるため 1 か所。0 で待たない) */
 private const val JOIN_START_DELAY_MS = 2_500L
