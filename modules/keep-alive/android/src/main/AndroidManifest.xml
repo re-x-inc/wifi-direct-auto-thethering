@@ -1,11 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+  <!-- 位置情報タイプの前面サービスがあると、背面でも「アプリ使用中のみ」の位置情報(appop foreground)が保たれ、Nearby の探索が 8034 にならない -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <application>
     <service
       android:name="expo.modules.keepalive.KeepAliveService"
       android:exported="false"
-      android:foregroundServiceType="connectedDevice" />
+      android:foregroundServiceType="connectedDevice|location" />
   </application>
 </manifest>

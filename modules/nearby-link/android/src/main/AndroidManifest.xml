@@ -3,8 +3,12 @@
   <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
   <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
   <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-  <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="31" />
+  <!-- GMS の Nearby は API 32 以上でも ACCESS_COARSE_LOCATION を見ることがある(実機 Android 17 で discover が 8034 MISSING_PERMISSION_ACCESS_COARSE_LOCATION)。
+       maxSdkVersion を付けず宣言し、実行時にも要求する(permissions.ts)。おおよその位置で足りる -->
+  <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
   <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="31" />
+  <!-- 背面の探索(Nearby)が appop で拒否され 8034 になるのを防ぐ「常に許可」。Android 10 以降。実行時は設定画面で選ばせる(permissions.ts / Tether.backgroundLocation) -->
+  <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
   <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
   <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
