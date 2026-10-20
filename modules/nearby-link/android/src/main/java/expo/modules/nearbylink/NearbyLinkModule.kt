@@ -32,6 +32,41 @@ private const val LINK_STALE_MS = 300_000L // 動きが止まってこれだけ�
 private const val LINK_TICK_MS = 5_000L
 
 /**
+ * Nearby に使わせる medium の切り替え(試験で比べるため 1 か所):
+ *  "default" = 従来どおり(Nearby が WIFI_LAN・WIFI_HOTSPOT・WIFI_DIRECT へ帯域を自動で切り替える)
+ *  "bt"      = Bluetooth Classic + BLE だけ。Wi-Fi 系(LAN/Aware/Hotspot/Direct)・NFC・WebRTC を使わせず、帯域の自動アップグレードも止める
+ *  "ble"     = BLE だけ(Classic も使わない。8007 で繋がらないことがある)
+ * 公開 API には medium を選ぶ設定が無い(connectionType・disruptiveUpgrade・lowPower のみ)ため、
+ * Options 内の非公開フィールドを reflection で書き換える。フィールド名は play-services-nearby 19.3.0 の実物
+ * (toString の並びと既定値で確認)。名前が合わない版では何もせず、ログに出す。
+ */
+private const val NEARBY_MEDIUMS = "bt"
+
+private fun setBool(o: Any, field: String, v: Boolean) {
+  val f = o.javaClass.getDeclaredField(field)
+  if (f.type != Boolean::class.javaPrimitiveType) error("$field is ${f.type}")
+  f.isAccessible = true
+  f.setBoolean(o, v)
+}
+
+/** NEARBY_MEDIUMS に従い、Options 内の medium フラグを書き換える。fields: [bluetooth, ble, wifiLan, nfc, wifiAware, wifiHotspot, wifiDirect, webRtc, autoUpgrade](無い項目は null) */
+private fun applyMediums(o: Any, kind: String, fields: Array<String?>): String {
+  if (NEARBY_MEDIUMS == "default") return "$kind mediums=default"
+  val bt = NEARBY_MEDIUMS == "bt"
+  val want = booleanArrayOf(bt, true, false, false, false, false, false, false, false)
+  return try {
+    for (i in fields.indices) fields[i]?.let { setBool(o, it, want[i]) }
+    "$kind mediums=$NEARBY_MEDIUMS applied: $o"
+  } catch (e: Throwable) {
+    "$kind mediums=$NEARBY_MEDIUMS FAILED to apply ($e) -> default のまま"
+  }
+}
+
+private val ADV_FIELDS = arrayOf<String?>("zzd", "zze", "zzi", "zzj", "zzk", null, null, "zzm", "zzb")
+private val DISC_FIELDS = arrayOf<String?>("zzc", "zzd", "zzg", "zzh", "zzi", null, null, null, null)
+private val CONN_FIELDS = arrayOf<String?>("zzb", "zzc", "zzd", "zze", "zzf", "zzg", "zzh", "zzj", null)
+
+/**
  * Nearby Connections の薄いラッパー。受け入れ可否・認証の方針は JS 側で決める
  * (既知の相手は共有コードの HMAC で確認して自動承認、初回だけ認証コードを人が確認)。
  */
@@ -65,6 +100,12 @@ class NearbyLinkModule : Module() {
         linkDown(endpointId)
         sendEvent("onFailed", mapOf("endpointId" to endpointId, "code" to result.status.statusCode))
       }
+    }
+    override fun onBandwidthChanged(endpointId: String, info: com.google.android.gms.nearby.connection.BandwidthInfo) {
+      // quality: 0=UNKNOWN 1=LOW(BT/BLE) 2=MEDIUM 3=HIGH(Wi-Fi 系)。medium 名そのものは API に無い
+      val q = when (info.quality) { 1 -> "LOW(BT/BLE)"; 2 -> "MEDIUM"; 3 -> "HIGH(Wi-Fi系)"; else -> "UNKNOWN" }
+      android.util.Log.i("DH-NEARBY", "bandwidth changed ep=$endpointId quality=$q mediums=$NEARBY_MEDIUMS")
+      sendEvent("onBandwidth", mapOf("endpointId" to endpointId, "quality" to info.quality))
     }
     override fun onDisconnected(endpointId: String) {
       linkDown(endpointId)
@@ -140,7 +181,10 @@ class NearbyLinkModule : Module() {
     val low = lowNow()
     curLow = low
     android.util.Log.i("DH-NEARBY", "advertise lowPower=$low name=$name")
-    val o = AdvertisingOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(low).build()
+    val ab = AdvertisingOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(low)
+    if (NEARBY_MEDIUMS != "default") ab.setConnectionType(com.google.android.gms.nearby.connection.ConnectionType.NON_DISRUPTIVE).setDisruptiveUpgrade(false)
+    val o = ab.build()
+    android.util.Log.i("DH-NEARBY", applyMediums(o, "advertise", ADV_FIELDS))
     client.stopAdvertising()
     client.startAdvertising(name, SERVICE_ID, lifecycle, o).addOnFailureListener { e -> report("advertise", e) }
   }
@@ -174,8 +218,11 @@ class NearbyLinkModule : Module() {
     rediscover = null
   }
 
-  private fun discoveryOptions() =
-    DiscoveryOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(lowNow()).build()
+  private fun discoveryOptions(): DiscoveryOptions {
+    val o = DiscoveryOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(lowNow()).build()
+    android.util.Log.i("DH-NEARBY", applyMediums(o, "discover", DISC_FIELDS))
+    return o
+  }
 
   private val discovery = object : EndpointDiscoveryCallback() {
     override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
@@ -241,7 +288,10 @@ class NearbyLinkModule : Module() {
   private fun requestWithRetry(endpointId: String, name: String, attempt: Int, rediscovered: Int = 0, deadline: Long = 0L, peerIn: String? = null) {
     // 相手の広告名: 引き継いだもの → 探索で見えているもの → 以前見えたもの の順。stop() で探索の記録が消えても追えるようにする
     val peerName = peerIn ?: foundNames[endpointId] ?: knownNames[endpointId]
-    val o = ConnectionOptions.Builder().setLowPower(false).build()
+    val cb = ConnectionOptions.Builder().setLowPower(false)
+    if (NEARBY_MEDIUMS != "default") cb.setConnectionType(com.google.android.gms.nearby.connection.ConnectionType.NON_DISRUPTIVE).setDisruptiveUpgrade(false)
+    val o = cb.build()
+    android.util.Log.i("DH-NEARBY", applyMediums(o, "requestConnection", CONN_FIELDS))
     client.requestConnection(name, endpointId, lifecycle, o).addOnFailureListener { e ->
       val code = (e as? com.google.android.gms.common.api.ApiException)?.statusCode ?: -1
       android.util.Log.w("DH-NEARBY", "requestConnect attempt=${attempt + 1}/${RETRY_MAX + 1} code=$code peer=$peerName")
@@ -260,7 +310,7 @@ class NearbyLinkModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("NearbyLink")
-    Events("onFound", "onLost", "onInitiated", "onConnected", "onFailed", "onDisconnected", "onMessage", "onError")
+    Events("onFound", "onLost", "onInitiated", "onConnected", "onFailed", "onDisconnected", "onMessage", "onError", "onBandwidth")
 
     // 1対1。待っている間(広告・探索)は省電力(BLE のみ)。接続要求だけ省電力を外す(requestWithRetry)
     Function("advertise") { name: String ->

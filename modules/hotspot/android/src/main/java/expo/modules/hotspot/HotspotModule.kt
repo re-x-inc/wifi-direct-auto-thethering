@@ -31,6 +31,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 private const val TAG = "DH-P2P"
 private const val JOIN_TIMEOUT_MS = 25_000L
 private const val GROUP_READY_MS = 15_000L
+/** group ready のあと、ビーコンが出始めるまで待ってから子機が join を始める時間(試験で比べるため 1 か所。0 で待たない) */
+private const val JOIN_START_DELAY_MS = 2_500L
 
 class HotspotModule : Module() {
   private var reservation: WifiManager.LocalOnlyHotspotReservation? = null
@@ -106,7 +108,7 @@ class HotspotModule : Module() {
       }
       val cfg = b.build()
       // パスフレーズは出さない
-      Log.i(TAG, "startDirect ssid=$name band=$band(requested freq=${freq ?: 0})")
+      Log.i(TAG, "startDirect ssid=$name passLen=${pass.length} passTag=${passTag(pass)} band=$band(requested freq=${freq ?: 0})")
       // 以前のグループが残っていれば消してから作る(BUSY のときは段階的に片付ける。手順と結果は DH-P2P のログ)
       clearThenCreate(m, ch, cfg, name, pass, promise)
     }
@@ -234,7 +236,10 @@ class HotspotModule : Module() {
       joinPending = ssid
       joinWaiters.clear()
       joinWaiters.add(promise)
-      startJoin(ssid, pass, 1)
+      Log.i(TAG, "joinWifi accepted ssid=$ssid ssidBytes=${ssid.toByteArray(Charsets.UTF_8).size} passLen=${pass.length} passTag=${passTag(pass)} security=WPA2-PSK startDelay=${JOIN_START_DELAY_MS}ms")
+      logScan(ssid, "before-join", true)
+      if (JOIN_START_DELAY_MS > 0) mainHandler.postDelayed({ if (joinPending == ssid) startJoin(ssid, pass, 1) }, JOIN_START_DELAY_MS)
+      else startJoin(ssid, pass, 1)
     }
     Function("leaveWifi") { leave() }
 
@@ -326,6 +331,34 @@ class HotspotModule : Module() {
       }.start()
     }
   }
+
+  /** 合言葉の突き合わせ用に、先頭 4 桁だけの SHA-256(合言葉そのものは出さない)。親機・子機で同じ値になるはず */
+  private fun passTag(pass: String): String =
+    java.security.MessageDigest.getInstance("SHA-256").digest(pass.toByteArray(Charsets.UTF_8)).take(2).joinToString("") { "%02x".format(it) }
+
+  /** 対象 SSID が子機の Wi-Fi スキャン結果に見えているか。見えなければ「見つからない」、見えていれば「認証・接続の失敗」と切り分ける */
+  @Suppress("DEPRECATION", "MissingPermission")
+  private fun logScan(ssid: String, why: String, kick: Boolean) {
+    try {
+      val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+      if (kick) Log.i(TAG, "scan[$why] startScan=${wm.startScan()} (制限により false のことがある)")
+      val all = wm.scanResults
+      val hit = all.filter { r ->
+        val n = if (Build.VERSION.SDK_INT >= 33) r.wifiSsid?.toString()?.trim('"') else r.SSID
+        n == ssid
+      }
+      if (hit.isEmpty()) {
+        val directs = all.filter { (if (Build.VERSION.SDK_INT >= 33) r2s(it) else it.SSID).startsWith("DIRECT-") }
+        Log.w(TAG, "scan[$why] ssid=$ssid 見つからない total=${all.size} DIRECT-*=${directs.map { (if (Build.VERSION.SDK_INT >= 33) r2s(it) else it.SSID) + "@" + it.frequency }}")
+      } else hit.forEach { r ->
+        Log.i(TAG, "scan[$why] ssid=$ssid 見えている bssid=${r.BSSID} freq=${r.frequency} rssi=${r.level} caps=${r.capabilities} ageMs=${(android.os.SystemClock.elapsedRealtime() - r.timestamp / 1000)}")
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "scan[$why] failed $e (位置情報/NEARBY_WIFI_DEVICES の権限?)")
+    }
+  }
+  @Suppress("NewApi")
+  private fun r2s(r: android.net.wifi.ScanResult): String = r.wifiSsid?.toString()?.trim('"') ?: ""
 
   private fun reasonName(r: Int) = when (r) {
     WifiP2pManager.ERROR -> "ERROR"
@@ -498,6 +531,7 @@ class HotspotModule : Module() {
     cm.requestNetwork(req, cb)
     joinTimeout = Runnable {
       if (gen != joinGen || joinPending == null) return@Runnable
+      logScan(ssid, "timeout-attempt$attempt", false)
       runCatching { cm.unregisterNetworkCallback(cb) } // 取り下げて、承認ダイアログ(検索中)を残さない
       if (netCb === cb) netCb = null
       if (attempt < 2) {
