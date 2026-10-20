@@ -1,3 +1,4 @@
+import { ConnectGate } from './connectGate';
 import { Frame, Transport } from './supervisor';
 
 type Handler = (e: any) => void;
@@ -47,6 +48,8 @@ export class NearbyTransport implements Transport {
   private unsubs: (() => void)[] = [];
   private authed = false;
   private closed = false;
+  /** requestConnection は endpoint ごとに 1 つだけ進行中(onFound の重複で重ねない) */
+  private gate = new ConnectGate();
 
   constructor(private api: NearbyApi, private o: NearbyOptions) {}
 
@@ -71,9 +74,14 @@ export class NearbyTransport implements Transport {
       this.unsubs.push(
         api.on('onFound', (e) => {
           if (o.role === 'guest' && e.name === o.pair.peerId && !this.endpoint) {
+            if (!this.gate.tryAcquire(e.endpointId)) {
+              console.log(`[DH] requestConnect 見送り(進行中) ep=${e.endpointId}`);
+              return;
+            }
             api.requestConnect(e.endpointId, o.selfId);
           }
         }),
+        api.on('onLost', (e) => this.gate.release(e.endpointId)),
         api.on('onInitiated', (e) => {
           // ペアリング中の相手(P|…)の接続要求は、リンクの対象外。断らずに無視する(ペアリング側が処理する)
           if (e.name?.startsWith('P|')) return;
@@ -88,11 +96,13 @@ export class NearbyTransport implements Transport {
           if (e.endpointId !== this.endpoint) return;
           this.write({ t: 'hello', nonce: myNonce });
         }),
-        api.on('onError', (e) => console.log(`[DH] Nearby ${e.op} 失敗 code=${e.code}`)),
+        api.on('onError', (e) => console.log(`[DH] Nearby ${e.op} 失敗 code=${e.code}${e.code === 8012 || e.code === 8009 ? '(後始末のあと探索からやり直す)' : ''}`)),
         api.on('onFailed', (e) => {
+          this.gate.release(e.endpointId);
           if (e.endpointId === this.endpoint) fail('connection failed');
         }),
         api.on('onDisconnected', (e) => {
+          this.gate.release(e.endpointId);
           if (e.endpointId !== this.endpoint) return;
           if (!this.authed) fail('disconnected before auth');
           else this.close();

@@ -23,6 +23,9 @@ private const val SERVICE_ID = "info.rex.tether.link"
 private const val RETRY_MAX = 2
 private const val REDISCOVER_MAX = 2
 private const val REDISCOVER_TOTAL_MS = 30_000L
+// 8012(IO_ERROR)・8009(OUT_OF_ORDER_API_CALL)のあと、失敗した接続の後始末(disconnectFromEndpoint)が済むまで待つ時間。
+// この間は、どの endpoint にも次の requestConnection を出さない(後始末の途中に重ねると 8009 になる)
+private const val SETTLE_MS = 1_500L
 // ペア保存後の通常接続: つながっていない間だけ省電力にする(BLE だけだと 8007 で繋がらないため、はじめは lowPower=false)。
 // つながっている間は常に lowPower=false。切れたら、また下の時間割を頭から数える
 private const val LINK_FULL_POWER_MS = 120_000L // つながらないまま続いたら省電力に落とす
@@ -92,8 +95,54 @@ class NearbyLinkModule : Module() {
     override fun onPayloadTransferUpdate(endpointId: String, update: PayloadTransferUpdate) = Unit
   }
 
+  /**
+   * requestConnection は endpoint ごとに 1 つだけ進行中にする(onConnectionResult / onDisconnected / 失敗確定まで)。
+   * 進行中の endpoint に重ねて出すと、GMS が 8009 STATUS_OUT_OF_ORDER_API_CALL を返す。
+   */
+  private val inFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+  /** 失敗した接続の後始末が済むまで、次の requestConnection を出さない時刻(elapsedRealtime) */
+  @Volatile private var settleUntil = 0L
+
+  /** 8012 などを次の実機で切り分けるための、接続ごとの記録 */
+  private class ConnDiag(val startedAt: Long, val lowPowerReq: Boolean, val curLow: Boolean?) {
+    @Volatile var lastCb = "requestConnection"
+    @Volatile var lastCbAt = startedAt
+    @Volatile var quality = -1
+    @Volatile var attempts = 1
+  }
+  private val diags = java.util.concurrent.ConcurrentHashMap<String, ConnDiag>()
+
+  private fun markCb(endpointId: String, name: String) {
+    diags[endpointId]?.let { it.lastCb = name; it.lastCbAt = android.os.SystemClock.elapsedRealtime() }
+  }
+
+  private fun release(endpointId: String) {
+    inFlight.remove(endpointId)
+  }
+
+  /** 失敗時に、使っていた medium・lowPower・経過 ms・直前のコールバックなどを 1 行で出す(grep: "conn-fail") */
+  private fun logConnFail(endpointId: String, code: Int, peerName: String?) {
+    val now = android.os.SystemClock.elapsedRealtime()
+    val d = diags[endpointId]
+    val q = when (d?.quality) { 1 -> "LOW(BT/BLE)"; 2 -> "MEDIUM"; 3 -> "HIGH(Wi-Fi系)"; 0 -> "UNKNOWN"; else -> "none" }
+    android.util.Log.w("DH-NEARBY",
+      "conn-fail code=$code(${com.google.android.gms.nearby.connection.ConnectionsStatusCodes.getStatusCodeString(code)}) ep=$endpointId peer=$peerName " +
+      "mediums=$NEARBY_MEDIUMS lowPowerReq=${d?.lowPowerReq} discLowPower=${d?.curLow} elapsedMs=${d?.let { now - it.startedAt }} " +
+      "lastCb=${d?.lastCb} lastCbAgoMs=${d?.let { now - it.lastCbAt }} bandwidth=$q attempt=${d?.attempts} " +
+      "connected=${connected.size} inFlight=${inFlight.size} pairing=$pairing ${wifiState()}")
+  }
+
+  /** Wi-Fi との共存を見る手がかり。取れなければ空 */
+  private fun wifiState(): String = try {
+    val wm = appContext.reactContext?.applicationContext?.getSystemService(android.content.Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+    val i = wm?.connectionInfo
+    val on = wm?.isWifiEnabled
+    "wifiOn=$on wifiSsid=${if (i != null && i.networkId != -1) "connected" else "none"} wifiFreq=${i?.frequency} wifiRssi=${i?.rssi}"
+  } catch (e: Exception) { "wifi=?($e)" }
+
   private val lifecycle = object : ConnectionLifecycleCallback() {
     override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
+      markCb(endpointId, "onConnectionInitiated")
       sendEvent("onInitiated", mapOf(
         "endpointId" to endpointId,
         "name" to info.endpointName,
@@ -102,6 +151,9 @@ class NearbyLinkModule : Module() {
       ))
     }
     override fun onConnectionResult(endpointId: String, result: ConnectionResolution) {
+      markCb(endpointId, "onConnectionResult(${result.status.statusCode})")
+      if (!result.status.isSuccess) logConnFail(endpointId, result.status.statusCode, foundNames[endpointId] ?: knownNames[endpointId])
+      release(endpointId)
       if (result.status.isSuccess) {
         linkUp(endpointId)
         sendEvent("onConnected", mapOf("endpointId" to endpointId))
@@ -114,9 +166,13 @@ class NearbyLinkModule : Module() {
       // quality: 0=UNKNOWN 1=LOW(BT/BLE) 2=MEDIUM 3=HIGH(Wi-Fi 系)。medium 名そのものは API に無い
       val q = when (info.quality) { 1 -> "LOW(BT/BLE)"; 2 -> "MEDIUM"; 3 -> "HIGH(Wi-Fi系)"; else -> "UNKNOWN" }
       android.util.Log.i("DH-NEARBY", "bandwidth changed ep=$endpointId quality=$q mediums=$NEARBY_MEDIUMS")
+      diags[endpointId]?.quality = info.quality
+      markCb(endpointId, "onBandwidthChanged($q)")
       sendEvent("onBandwidth", mapOf("endpointId" to endpointId, "quality" to info.quality))
     }
     override fun onDisconnected(endpointId: String) {
+      markCb(endpointId, "onDisconnected")
+      release(endpointId)
       linkDown(endpointId)
       sendEvent("onDisconnected", mapOf("endpointId" to endpointId))
     }
@@ -255,7 +311,8 @@ class NearbyLinkModule : Module() {
       if (r != null && peerKey(info.endpointName) == peerKey(r.peerName)) {
         android.util.Log.i("DH-NEARBY", "rediscover ${r.count}/$REDISCOVER_MAX found ${info.endpointName} new endpointId=$endpointId -> reconnect")
         clearRediscover()
-        requestWithRetry(endpointId, r.myName, 0, r.count, r.deadline, r.peerName)
+        if (inFlight.add(endpointId)) requestWithRetry(endpointId, r.myName, 0, r.count, r.deadline, r.peerName)
+        else android.util.Log.i("DH-NEARBY", "rediscover: requestConnection already in flight ep=$endpointId -> skip")
       }
     }
     override fun onEndpointLost(endpointId: String) {
@@ -316,10 +373,22 @@ class NearbyLinkModule : Module() {
   private fun requestWithRetry(endpointId: String, name: String, attempt: Int, rediscovered: Int = 0, deadline: Long = 0L, peerIn: String? = null) {
     // 相手の広告名: 引き継いだもの → 探索で見えているもの → 以前見えたもの の順。stop() で探索の記録が消えても追えるようにする
     val peerName = peerIn ?: foundNames[endpointId] ?: knownNames[endpointId]
+    // 直前の失敗の後始末が済むまで待つ(重ねると 8009)。待つ間も、この endpoint の枠(inFlight)は持ったまま
+    val waitMs = settleUntil - android.os.SystemClock.elapsedRealtime()
+    if (waitMs > 0) {
+      android.util.Log.i("DH-NEARBY", "requestConnect wait ${waitMs}ms (前の失敗の後始末中) ep=$endpointId")
+      mainHandler.postDelayed({ requestWithRetry(endpointId, name, attempt, rediscovered, deadline, peerIn) }, waitMs)
+      return
+    }
     val cb = ConnectionOptions.Builder().setLowPower(false)
     if (NEARBY_MEDIUMS != "default") cb.setConnectionType(com.google.android.gms.nearby.connection.ConnectionType.NON_DISRUPTIVE).setDisruptiveUpgrade(false)
     val o = cb.build()
     android.util.Log.i("DH-NEARBY", applyMediums(o, "requestConnection", CONN_FIELDS))
+    val startedAt = android.os.SystemClock.elapsedRealtime()
+    val prev = diags[endpointId]
+    // 試行をまたいで「最初の要求からの経過」を数える(再試行でも startedAt は最初のまま)
+    diags[endpointId] = if (prev != null && attempt > 0) prev.also { it.attempts = attempt + 1; it.lastCb = "requestConnection(retry$attempt)"; it.lastCbAt = startedAt }
+                        else ConnDiag(startedAt, false, curLow)
     client.requestConnection(name, endpointId, lifecycle, o).addOnFailureListener { e ->
       if (!mediumsFallback && isInvalidOptions(e)) {
         android.util.Log.w("DH-NEARBY", "requestConnection rejected ($e) -> 一度だけ公開 API のみの Options で始め直す")
@@ -329,9 +398,26 @@ class NearbyLinkModule : Module() {
       }
       val code = (e as? com.google.android.gms.common.api.ApiException)?.statusCode ?: -1
       android.util.Log.w("DH-NEARBY", "requestConnect attempt=${attempt + 1}/${RETRY_MAX + 1} code=$code peer=$peerName")
+      markCb(endpointId, "requestConnection failed($code)")
+      logConnFail(endpointId, code, peerName)
       report(if (attempt == 0) "requestConnect" else "requestConnect(retry$attempt)", e)
+      if (code == 8012 || code == 8009) {
+        // IO_ERROR / OUT_OF_ORDER_API_CALL: 失敗した接続を片付け、後始末が済むまで(SETTLE_MS)待ってから、探索からやり直す。
+        // 待つ間は枠(inFlight)も settleUntil も保ち、次の requestConnection を出させない。
+        client.disconnectFromEndpoint(endpointId)
+        settleUntil = android.os.SystemClock.elapsedRealtime() + SETTLE_MS
+        android.util.Log.i("DH-NEARBY", "cleanup code=$code ep=$endpointId disconnectFromEndpoint -> ${SETTLE_MS}ms 待って rediscover")
+        mainHandler.postDelayed({
+          release(endpointId)
+          diags.remove(endpointId)
+          startRediscover(peerName, name, rediscovered, deadline, code)
+        }, SETTLE_MS)
+        return@addOnFailureListener
+      }
       val retry = (code == 8003 || code == 8007) && attempt < RETRY_MAX
       if (!retry) {
+        release(endpointId)
+        diags.remove(endpointId)
         if (code == 8011 || code == 8007) startRediscover(peerName, name, rediscovered, deadline, code)
         return@addOnFailureListener
       }
@@ -368,13 +454,18 @@ class NearbyLinkModule : Module() {
       mainHandler.removeCallbacks(powerTick)
       if (!pairing) mainHandler.postDelayed(powerTick, LINK_TICK_MS)
     }
-    Function("requestConnect") { endpointId: String, name: String -> requestWithRetry(endpointId, name, 0) }
+    Function("requestConnect") { endpointId: String, name: String ->
+      // endpoint ごとに 1 つだけ進行中。進行中なら新しく出さない(JS の onFound 重複・探索やり直しとの二重呼び出しを止める)
+      if (inFlight.add(endpointId)) requestWithRetry(endpointId, name, 0)
+      else android.util.Log.i("DH-NEARBY", "requestConnect skipped: already in flight ep=$endpointId")
+    }
     Function("accept") { endpointId: String -> client.acceptConnection(endpointId, payloads) }
     Function("reject") { endpointId: String -> client.rejectConnection(endpointId) }
     Function("send") { endpointId: String, text: String ->
       client.sendPayload(endpointId, Payload.fromBytes(text.toByteArray(Charsets.UTF_8)))
     }
     Function("disconnect") { endpointId: String ->
+      release(endpointId)
       client.disconnectFromEndpoint(endpointId)
       linkDown(endpointId) // 自分から切ったときは onDisconnected が来ないので、ここで「つながっていない」に戻す
     }
@@ -388,6 +479,9 @@ class NearbyLinkModule : Module() {
       lastActivity = android.os.SystemClock.elapsedRealtime()
       clearRediscover()
       foundNames.clear()
+      inFlight.clear()
+      diags.clear()
+      settleUntil = 0L
       client.stopAdvertising(); client.stopDiscovery(); client.stopAllEndpoints()
     }
 
