@@ -232,3 +232,13 @@ test('ペア解除で、その相手の能力キャッシュと履歴も消え�
   assert.ok(!(await host.platform.kv.get('tether.history.v1'))?.includes('DH-GUEST'));
   guestT.stop();
 });
+
+test('ペア解除で、その相手の Wi-Fi Direct 名・合言葉(direct.v1.<peerId>)も消える', async () => {
+  const { hostT, guestT, host } = await setup();
+  await hostT.start(); await guestT.start();
+  await until(() => hostT.getState().share === 'on');
+  assert.ok(await host.platform.kv.get('direct.v1.DH-GUEST'));
+  await hostT.removePair('DH-GUEST');
+  assert.ok(!(await host.platform.kv.get('direct.v1.DH-GUEST')));
+  guestT.stop(); hostT.stop();
+});

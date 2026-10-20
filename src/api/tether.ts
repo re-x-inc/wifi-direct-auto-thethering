@@ -1,5 +1,5 @@
 import { createLink } from '../link/session';
-import { directCreds } from '../pairing/directCreds';
+import { directCreds, removeDirectCreds } from '../pairing/directCreds';
 import type { LinkSupervisor } from '../link/supervisor';
 import { Confirm, Found, PairingResult, PairingSession } from '../pairing/pairing';
 import { getIdentity, PairStore } from '../pairing/store';
@@ -246,6 +246,7 @@ export class Tether {
   async removePair(peerId: string): Promise<void> {
     await this.store.remove(peerId);
     await removePeerData(this.p.kv, peerId).catch(() => {});
+    await removeDirectCreds(this.p.kv, peerId).catch(() => {});
     if (this.peerId === peerId) this.stop();
   }
 

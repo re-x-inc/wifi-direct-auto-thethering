@@ -5,4 +5,5 @@ import { KeyValue } from './types';
 export const secureKv: KeyValue = {
   get: (k) => SecureStore.getItemAsync(k),
   set: (k, v) => SecureStore.setItemAsync(k, v),
+  remove: (k) => SecureStore.deleteItemAsync(k),
 };
