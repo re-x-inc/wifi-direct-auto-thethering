@@ -267,7 +267,13 @@ export class Tether {
     if (wasStarted) this.stop();
     let self: Identity;
     try {
-      if (!(await this.p.requestPermissions())) this.log('権限が許可されていません');
+      // 権限は再要求しない: 拒否済みの権限を requestPermissions で再要求すると、画面に出ていない間は返らず広告が始まらない。
+      // 足りなければ、足りない一覧つきで即座に失敗にする(呼び出し側が ensurePermissions() などで先にそろえる)
+      const missing = this.p.missingPermissions ? await this.p.missingPermissions() : null;
+      if (missing && missing.length > 0) {
+        throw new TetherError('permission-denied', '権限が足りません: ' + missing.map((m) => m.slice(m.lastIndexOf('.') + 1)).join(', '), missing);
+      }
+      if (!missing && !(await this.p.requestPermissions())) this.log('権限が許可されていません');
       self = await this.identity();
     } catch (e) {
       this.pairingBusy = false;
@@ -300,6 +306,16 @@ export class Tether {
         if (this.pairing === s) this.cancelPairing();
       },
     };
+  }
+
+  /**
+   * 権限を求める(画面に出る)。beginPairing の前に呼ぶ。足りないものが残れば missing に入る(すべて許可なら空)。
+   * missingPermissions を持たない部品では requestPermissions の結果だけで判断する。
+   */
+  async ensurePermissions(): Promise<{ granted: boolean; missing: string[] }> {
+    const ok = await this.p.requestPermissions();
+    const missing = this.p.missingPermissions ? await this.p.missingPermissions() : [];
+    return { granted: ok && missing.length === 0, missing };
   }
 
   /** ペアリングをやめる(onDone は呼ばれない) */

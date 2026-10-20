@@ -9,4 +9,6 @@
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
   <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
   <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />
+  <!-- Android 17(API 37)の「近くのデバイス」権限。古い Android では未知の権限として無視される -->
+  <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 </manifest>

@@ -14,7 +14,7 @@ export const testRandomHex = (bytes: number) =>
   Array.from({ length: bytes }, () => ((n++ * 37 + 11) % 256).toString(16).padStart(2, '0')).join('');
 
 /** 端末の部品の偽物。呼び出しを calls に記録する。 */
-export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown> } = {}) {
+export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[] } = {}) {
   const calls: string[] = [];
   const files: Record<string, string> = {};
   const wifiLost = new Set<() => void>();
@@ -82,7 +82,8 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     hotspot,
     vpn,
     keepAlive: { start: () => void calls.push('keepAliveStart'), stop: () => void calls.push('keepAliveStop') },
-    requestPermissions: async () => true,
+    missingPermissions: async () => [...(o.missingPerms ?? [])],
+    requestPermissions: async () => (calls.push('requestPermissions'), true),
     randomHex: testRandomHex,
     sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))),
     now: () => Date.now(),

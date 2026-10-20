@@ -52,7 +52,7 @@ export interface TetherState {
 export type TetherErrorCode = 'no-pair' | 'unsupported' | 'permission-denied' | 'busy';
 
 export class TetherError extends Error {
-  constructor(public code: TetherErrorCode, message: string) {
+  constructor(public code: TetherErrorCode, message: string, public missing?: string[]) {
     super(message);
     this.name = 'TetherError';
   }
@@ -121,6 +121,8 @@ export interface TetherPlatform {
   keepAlive: { start(): void; stop(): void };
   /** Nearby / 近隣 Wi-Fi / 通知などの権限を求める。すべて許可なら true */
   requestPermissions(): Promise<boolean>;
+  /** 画面を出さずに、足りない実行時権限(android.permission.* のフルネーム)を返す。無ければ beginPairing は従来どおり再要求する */
+  missingPermissions?(): Promise<string[]>;
   randomHex(bytes: number): string;
   sleep(ms: number): Promise<void>;
   now(): number;
