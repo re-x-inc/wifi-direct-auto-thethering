@@ -957,22 +957,22 @@ export interface DirectPlan {
 }
 const describePlan = (p: DirectPlan) => (p.freq ? `${p.band}GHz/${p.freq}MHz` : `${p.band}GHz/自動`);
 
+/** 屋外(車・バイク)で使うため GO は 2.4GHz 固定。5GHz は DFS(W53/W56)の制約があるので候補にしない */
+const GO_CHANNELS_24 = [2412, 2437, 2462];
+
 /**
- * Direct(GO)を作る帯域・チャンネルの候補を、優先順に返す。sta = 親機の Wi-Fi の周波数(未接続は 0)。
- * 親機の STA と GO が別チャンネルだと無線が時分割(MCC)になり、GO のビーコンが間欠になって子機のスキャンに出ないことがあるため、
- * STA と同じチャンネル(次点で同じ帯域)を先に試し、だめなら 2.4GHz 自動(従来どおり)へ戻す。
+ * Direct(GO)を作る周波数の候補を、優先順に返す。sta = 親機の Wi-Fi の周波数(未接続は 0)。
+ * 既定は 2.4GHz の 1/6/11ch を順に。親機の STA が 2.4GHz のときだけ、そのチャンネルを先頭にして時分割(MCC)を避ける。
+ * 最後に 2.4GHz 自動を置く(それでも 2.4GHz)。5GHz は使わない。
  */
 export function pickDirectPlans(sta: number): DirectPlan[] {
-  const auto24: DirectPlan = { freq: null, band: '2.4', reason: '2.4GHz 自動(従来どおり)' };
-  if (!(sta > 0)) return [{ ...auto24, reason: '親機が Wi-Fi 未接続: 従来どおり 2.4GHz 自動' }];
-  if (sta >= 2412 && sta <= 2484) return [{ freq: sta, band: '2.4', reason: '親機の Wi-Fi(2.4GHz)と同じチャンネルに合わせる' }, { ...auto24, reason: '同チャンネル失敗: 2.4GHz 自動へ' }];
-  if (sta >= 5170 && sta <= 5825) {
-    const dfs = sta >= 5260 && sta <= 5720;
-    return [
-      { freq: sta, band: '5', reason: dfs ? '親機の Wi-Fi は 5GHz DFS: 同チャンネルでの GO 作成を試す(拒否されうる)' : '親機の Wi-Fi(5GHz)と同じチャンネルに合わせる' },
-      { freq: null, band: '5', reason: '同チャンネル失敗: 5GHz 自動(同じ帯域で時分割を避ける)' },
-      { ...auto24, reason: '5GHz 失敗: 2.4GHz 自動へ戻す' },
-    ];
+  const plans: DirectPlan[] = [];
+  const sta24 = sta >= 2412 && sta <= 2484;
+  if (sta24) plans.push({ freq: sta, band: '2.4', reason: `親機の Wi-Fi(${sta}MHz)と同じ 2.4GHz チャンネルに合わせる` });
+  for (const f of GO_CHANNELS_24) {
+    if (f === sta) continue;
+    plans.push({ freq: f, band: '2.4', reason: sta24 ? `STA と同チャンネルが不可: 2.4GHz ${f}MHz` : sta > 0 ? `親機の Wi-Fi は ${sta}MHz(2.4GHz 以外): GO は屋外向けに 2.4GHz 固定、${f}MHz を試す` : `親機が Wi-Fi 未接続: 2.4GHz ${f}MHz を試す` });
   }
-  return [{ ...auto24, reason: `親機の Wi-Fi ${sta}MHz は対象外の帯域: 2.4GHz 自動` }];
+  plans.push({ freq: null, band: '2.4', reason: '指定チャンネルがすべて不可: 2.4GHz 自動(従来どおり)' });
+  return plans;
 }

@@ -594,7 +594,13 @@ class HotspotModule : Module() {
   /** 参加を 1 回試す。JOIN_TIMEOUT_MS で見つからなければ要求を取り下げ(ダイアログを残さない)、1 回だけやり直す */
   private fun startJoin(ssid: String, pass: String, attempt: Int) {
     val gen = ++joinGen
-    val spec = WifiNetworkSpecifier.Builder().setSsid(ssid).setWpa2Passphrase(pass).build()
+    val sb = WifiNetworkSpecifier.Builder().setSsid(ssid).setWpa2Passphrase(pass)
+    // 親機の GO は 2.4GHz 固定。子機の探索も 2.4GHz に絞り、5GHz/DFS のオフチャンネルスキャンに時間を取られないようにする(API 33+。非対応・失敗時は指定なし)
+    if (Build.VERSION.SDK_INT >= 33) {
+      try { sb.setBand(android.net.wifi.ScanResult.WIFI_BAND_24_GHZ); Log.i(TAG, "joinWifi scan band=2.4GHz only") }
+      catch (e: Throwable) { Log.w(TAG, "joinWifi setBand(2.4GHz) failed $e -> 帯域指定なし") }
+    } else Log.i(TAG, "joinWifi scan band=指定なし(API<33 は WifiNetworkSpecifier.setBand 不可)")
+    val spec = sb.build()
     val req = NetworkRequest.Builder()
       .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
       .setNetworkSpecifier(spec)
