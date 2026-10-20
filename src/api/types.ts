@@ -2,6 +2,7 @@ import type { NearbyApi } from '../link/nearbyTransport';
 import type { Options as LinkTiming, SendOptions } from '../link/supervisor';
 import type { KeyValue } from '../pairing/types';
 import type { CapabilityPort } from './capability';
+import type { JoinFailure } from './joinFailure';
 import type { LinkPlan, PlanPolicy } from './planner';
 
 export type { SendOptions };
@@ -36,6 +37,8 @@ export interface TetherState {
   wifi: 'off' | 'joining' | 'joined' | 'failed';
   /** 子機: 端末の Wi-Fi 接続許可の画面が出ている(画面で「『接続』を押してください」と知らせる)。native の onJoinPrompt から */
   joinPrompt: boolean;
+  /** 子機: 直近の参加失敗の理由とスキャンの要約(「詳細」に 1 行出す用)。参加を始めるか停止すると null */
+  joinFailure: JoinFailure | null;
   /**
    * 子機: VPN の状態。
    * awaiting-permission = 端末の VPN 許可ダイアログ待ち / held = 利用者が非常口で止めた(resumeVpn まで自動では張らない)
