@@ -1,6 +1,8 @@
 import { NativeModule, requireNativeModule } from 'expo';
 
 type Events = {
+  /** ネイティブのログ(DH-P2P など)。SSID・BSSID・端末名は伏せ済み。line は "i|w 本文" */
+  log(e: { tag: string; line: string }): void;
   onHotspotStopped(e: Record<string, never>): void;
   onWifiLost(e: Record<string, never>): void;
   /** 子機の Wi-Fi 参加。phase 'show' = 端末の許可画面が出る(「接続」を押してもらう)。ok/declined/timeout/cancelled = 終わり */

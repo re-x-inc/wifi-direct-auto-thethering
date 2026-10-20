@@ -2,6 +2,7 @@ import * as Crypto from 'expo-crypto';
 import { PermissionsAndroid, Platform } from 'react-native';
 import Hotspot from '../../modules/hotspot';
 import KeepAlive from '../../modules/keep-alive';
+import NearbyLink from '../../modules/nearby-link';
 import VpnTunnel from '../../modules/vpn-tunnel';
 import { nearbyApi } from '../nearbyApi';
 import { secureKv } from '../pairing/secureKv';
@@ -15,6 +16,10 @@ export { permsFor } from './permissions';
 export function nativePlatform(): TetherPlatform {
   return {
     nearby: nearbyApi,
+    onNativeLog: (cb) => {
+      const subs = [Hotspot, NearbyLink].map((m: any) => m.addListener('log', (e: { tag: string; line: string }) => cb(e.tag, e.line)));
+      return () => subs.forEach((s) => s.remove());
+    },
     kv: secureKv,
     hotspot: {
       startHotspot: () => Hotspot.startHotspot(),

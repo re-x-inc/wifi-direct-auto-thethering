@@ -111,6 +111,8 @@ export interface VpnPort {
 
 export interface TetherPlatform {
   nearby: NearbyApi;
+  /** ネイティブ(DH-P2P / DH-NEARBY)のログを購読する。tether.onLog に流れる。戻り値で解除 */
+  onNativeLog?(cb: (tag: string, line: string) => void): () => void;
   /** 共有コードの保管先(本番は SecureStore) */
   kv: KeyValue;
   hotspot: HotspotPort;

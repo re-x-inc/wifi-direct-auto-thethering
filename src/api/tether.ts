@@ -92,6 +92,8 @@ export class Tether {
 
   constructor(private p: TetherPlatform, private cfg: TetherConfig = {}) {
     this.store = new PairStore(p.kv);
+    // ネイティブのログ(SSID・合言葉は伏せ済み)も診断ログに流す。形: "[DH-P2P] i 本文"
+    try { p.onNativeLog?.((tag, line) => this.log(`[${tag}] ${line}`)); } catch {}
     this.state = {
       started: false, role: null, autoRole: this.detectRole(), peer: null,
       link: 'stopped', attempt: 0,
