@@ -29,7 +29,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 親機のポートへ TCP で到達できるかを確かめる。インターネット共有そのものは M2 以降(SOCKS5 / VPN)。
  */
 private const val TAG = "DH-P2P"
-private const val JOIN_TIMEOUT_MS = 25_000L
+/** 子機の参加を待つ時間。初回は利用者が「接続」を押すまで待つので長めにする。ダイアログが出ている間に取り下げない */
+private const val JOIN_TIMEOUT_MS = 60_000L
 private const val GROUP_READY_MS = 15_000L
 /** group ready のあと、ビーコンが出始めるまで待ってから子機が join を始める時間(試験で比べるため 1 か所。0 で待たない) */
 private const val JOIN_START_DELAY_MS = 2_500L
@@ -60,7 +61,7 @@ class HotspotModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("Hotspot")
-    Events("onHotspotStopped", "onWifiLost")
+    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt")
 
     // ---- 親機 ----
     AsyncFunction("startHotspot") { promise: Promise ->
@@ -373,11 +374,30 @@ class HotspotModule : Module() {
    * (2) それでも BUSY なら persistent group を消し、チャンネルを作り直す
    * ことを試してから createGroup する。
    */
+  @Suppress("MissingPermission")
   private fun clearThenCreate(m: WifiP2pManager, ch: WifiP2pManager.Channel, cfg: WifiP2pConfig, name: String, pass: String, promise: Promise) {
+    // group が無ければ removeGroup は BUSY になる(AOSP: InactiveState で REMOVE_GROUP を DefaultState が処理)。先に有無を見て、無ければ何もしない
+    try {
+      m.requestGroupInfo(ch) { g ->
+        if (g == null) {
+          Log.i(TAG, "no existing group -> skip removeGroup/cleanup")
+          create(m, ch, cfg, name, pass, promise, 0)
+        } else {
+          Log.i(TAG, "existing group ssid=${g.networkName} isGO=${g.isGroupOwner} -> removeGroup")
+          removeExisting(m, ch, cfg, name, pass, promise)
+        }
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "requestGroupInfo before create failed $e -> removeGroup")
+      removeExisting(m, ch, cfg, name, pass, promise)
+    }
+  }
+
+  private fun removeExisting(m: WifiP2pManager, ch: WifiP2pManager.Channel, cfg: WifiP2pConfig, name: String, pass: String, promise: Promise) {
     m.removeGroup(ch, object : WifiP2pManager.ActionListener {
       override fun onSuccess() { Log.i(TAG, "removeGroup ok"); create(m, ch, cfg, name, pass, promise, 0) }
       override fun onFailure(reason: Int) {
-        Log.i(TAG, "removeGroup failed reason=${reasonName(reason)} (グループが無ければ正常。BUSY なら片付けを試す)")
+        Log.i(TAG, "removeGroup failed reason=${reasonName(reason)} (group はあるのに BUSY: 片付けを試す)")
         if (reason != WifiP2pManager.BUSY) { create(m, ch, cfg, name, pass, promise, 0); return }
         Log.i(TAG, "cleanup step1: cancelConnect + stopPeerDiscovery")
         runCatching { m.cancelConnect(ch, null) }
@@ -514,12 +534,12 @@ class HotspotModule : Module() {
         val gw = gatewayOf(lp) ?: return
         joinedGw = gw
         Log.i(TAG, "join ok ssid=$ssid gw=$gw attempt=$attempt")
-        finishJoin(null, gw)
+        finishJoin("ok", null, gw)
       }
       override fun onUnavailable() {
         if (gen != joinGen) return
         Log.w(TAG, "join unavailable ssid=$ssid attempt=$attempt (拒否または見つからない)")
-        finishJoin("network unavailable (timeout or user declined)", null)
+        finishJoin("declined", "network unavailable (timeout or user declined)")
       }
       override fun onLost(n: Network) {
         if (gen == joinGen && joined == n) { joined = null; joinedGw = null; joinedSsid = null; cm.bindProcessToNetwork(null) }
@@ -527,25 +547,22 @@ class HotspotModule : Module() {
       }
     }
     netCb = cb
-    Log.i(TAG, "joinWifi requestNetwork ssid=$ssid attempt=$attempt/2 timeout=${JOIN_TIMEOUT_MS}ms")
+    Log.i(TAG, "joinWifi requestNetwork ssid=$ssid (1 回だけ) timeout=${JOIN_TIMEOUT_MS}ms")
+    sendEvent("onJoinPrompt", mapOf("ssid" to ssid, "phase" to "show", "timeoutMs" to JOIN_TIMEOUT_MS))
     cm.requestNetwork(req, cb)
     joinTimeout = Runnable {
       if (gen != joinGen || joinPending == null) return@Runnable
-      logScan(ssid, "timeout-attempt$attempt", false)
-      runCatching { cm.unregisterNetworkCallback(cb) } // 取り下げて、承認ダイアログ(検索中)を残さない
+      logScan(ssid, "timeout", false)
+      runCatching { cm.unregisterNetworkCallback(cb) } // 取り下げて、承認ダイアログを残さない
       if (netCb === cb) netCb = null
-      if (attempt < 2) {
-        Log.w(TAG, "join timeout ssid=$ssid attempt=$attempt -> unregister and retry once")
-        mainHandler.postDelayed({ if (joinPending == ssid) startJoin(ssid, pass, attempt + 1) }, 1_000L)
-      } else {
-        Log.w(TAG, "join timeout ssid=$ssid attempt=$attempt -> give up")
-        finishJoin("network not found within ${JOIN_TIMEOUT_MS / 1000}s x2 (親機のグループを作り直してください)", null)
-      }
+      Log.w(TAG, "join timeout ssid=$ssid after ${JOIN_TIMEOUT_MS}ms -> give up (やり直しは呼び出し側)")
+      finishJoin("timeout", "network not found or not approved within ${JOIN_TIMEOUT_MS / 1000}s")
     }
     mainHandler.postDelayed(joinTimeout!!, JOIN_TIMEOUT_MS)
   }
 
-  private fun finishJoin(error: String?, gw: String?) {
+  private fun finishJoin(phase: String, error: String?, gw: String? = null) {
+    sendEvent("onJoinPrompt", mapOf("ssid" to (joinedSsid ?: ""), "phase" to phase))
     joinTimeout?.let { mainHandler.removeCallbacks(it) }
     joinTimeout = null
     val ws = joinWaiters.toList()
@@ -560,7 +577,7 @@ class HotspotModule : Module() {
     joinTimeout?.let { mainHandler.removeCallbacks(it) }
     joinTimeout = null
     joinGen++
-    if (joinPending != null) finishJoin("cancelled", null)
+    if (joinPending != null) finishJoin("cancelled", "cancelled")
     cm.bindProcessToNetwork(null)
     netCb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
     netCb = null

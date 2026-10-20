@@ -3,6 +3,8 @@ import { NativeModule, requireNativeModule } from 'expo';
 type Events = {
   onHotspotStopped(e: Record<string, never>): void;
   onWifiLost(e: Record<string, never>): void;
+  /** 子機の Wi-Fi 参加。phase 'show' = 端末の許可画面が出る(「接続」を押してもらう)。ok/declined/timeout/cancelled = 終わり */
+  onJoinPrompt(e: { ssid: string; phase: 'show' | 'ok' | 'declined' | 'timeout' | 'cancelled'; timeoutMs?: number }): void;
 };
 
 declare class HotspotModule extends NativeModule<Events> {
