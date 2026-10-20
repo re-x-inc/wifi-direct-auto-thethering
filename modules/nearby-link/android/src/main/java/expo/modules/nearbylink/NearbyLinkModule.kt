@@ -57,6 +57,9 @@ class NearbyLinkModule : Module() {
     }
   }
 
+  /** ペアリング中だけ true。広告・探索の省電力を外す */
+  @Volatile private var pairing = false
+
   /** 開始系の失敗を握りつぶさず、コード付きでログと JS に伝える */
   private fun report(op: String, e: Exception) {
     val code = (e as? com.google.android.gms.common.api.ApiException)?.statusCode ?: -1
@@ -99,7 +102,10 @@ class NearbyLinkModule : Module() {
 
     // 1対1。待っている間(広告・探索)は省電力(BLE のみ)。接続要求だけ省電力を外す(requestWithRetry)
     Function("advertise") { name: String ->
-      val o = AdvertisingOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(true).build()
+      // ペアリング中(名前が P| で始まる)だけ省電力を外す。BLE だけだと 8007 で繋がらないことがあり、Bluetooth Classic / Wi-Fi も使えるようにする。終わったら stop() か通常の名前で省電力に戻る
+      pairing = name.startsWith("P|")
+      android.util.Log.i("DH-NEARBY", "advertise lowPower=${!pairing} name=$name")
+      val o = AdvertisingOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(!pairing).build()
       // 停止→再開始で前回の広告が残っていると ALREADY_ADVERTISING になるため、先に止める(同じ client への呼び出しは順序どおり処理される)
       // 前回の接続の残骸(GMS が ALREADY_CONNECTED と思い込む)を一掃してから始める
       client.stopAllEndpoints()
@@ -107,7 +113,8 @@ class NearbyLinkModule : Module() {
       client.startAdvertising(name, SERVICE_ID, lifecycle, o).addOnFailureListener { e -> report("advertise", e) }
     }
     Function("discover") {
-      val o = DiscoveryOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(true).build()
+      android.util.Log.i("DH-NEARBY", "discover lowPower=${!pairing}")
+      val o = DiscoveryOptions.Builder().setStrategy(Strategy.P2P_POINT_TO_POINT).setLowPower(!pairing).build()
       client.stopAllEndpoints()
       client.stopDiscovery()
       client.startDiscovery(SERVICE_ID, discovery, o).addOnFailureListener { e -> report("discover", e) }
@@ -120,6 +127,7 @@ class NearbyLinkModule : Module() {
     }
     Function("disconnect") { endpointId: String -> client.disconnectFromEndpoint(endpointId) }
     Function("stop") {
+      pairing = false
       client.stopAdvertising(); client.stopDiscovery(); client.stopAllEndpoints()
     }
 
