@@ -423,6 +423,7 @@ export class Tether {
         this.offWifiLost = this.p.hotspot.onWifiLost(() => this.onWifiLost(gen));
         this.offJoinPrompt = this.p.hotspot.onJoinPrompt?.((e) => {
           if (gen !== this.gen) return;
+          // 'show' だけが案内を出す。ok / declined / timeout / cancelled はどれも「終わり」なので案内を必ず消す
           this.set({ joinPrompt: e.phase === 'show' });
           this.log(`Wi-Fi 許可画面: ${e.phase}`);
         }) ?? null;
@@ -928,6 +929,8 @@ export class Tether {
       this.link?.send({ kind: 'tether.wifi-result', ok: false, error: msg } satisfies Wire, { key: 'wifi-result', ttlMs: WIFI_TTL_MS });
     } finally {
       this.joining = false;
+      // 取りこぼしの保険: 参加の処理が終わったら許可画面の案内は出さない
+      if (gen === this.gen && this.state.joinPrompt) this.set({ joinPrompt: false });
     }
   }
 

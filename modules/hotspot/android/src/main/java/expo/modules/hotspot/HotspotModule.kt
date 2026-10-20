@@ -636,7 +636,13 @@ class HotspotModule : Module() {
     sendEvent("onJoinPrompt", mapOf("ssid" to ssid, "phase" to "show", "timeoutMs" to JOIN_TIMEOUT_MS))
     cm.requestNetwork(req, cb)
     joinTimeout = Runnable {
-      if (gen != joinGen || joinPending == null) return@Runnable
+      if (gen != joinGen) return@Runnable
+      if (joinPending == null) { // 待ち手が居なくても、許可画面の案内を JS に残さない
+        sendEvent("onJoinPrompt", mapOf("ssid" to ssid, "phase" to "timeout"))
+        runCatching { cm.unregisterNetworkCallback(cb) }
+        if (netCb === cb) netCb = null
+        return@Runnable
+      }
       logScan(ssid, "timeout", false)
       runCatching { cm.unregisterNetworkCallback(cb) } // 取り下げて、承認ダイアログを残さない
       if (netCb === cb) netCb = null
@@ -647,6 +653,7 @@ class HotspotModule : Module() {
   }
 
   private fun finishJoin(phase: String, error: String?, gw: String? = null) {
+    if (joinPending == null) return // 終わった参加への二重通知(onLinkPropertiesChanged の繰り返し等)は送らない
     sendEvent("onJoinPrompt", mapOf("ssid" to (joinedSsid ?: ""), "phase" to phase))
     joinTimeout?.let { mainHandler.removeCallbacks(it) }
     joinTimeout = null
@@ -663,6 +670,7 @@ class HotspotModule : Module() {
     joinTimeout = null
     joinGen++
     if (joinPending != null) finishJoin("cancelled", "cancelled")
+    else if (netCb != null && joined == null) sendEvent("onJoinPrompt", mapOf("ssid" to (joinedSsid ?: ""), "phase" to "cancelled")) // 要求が残ったまま取り下げ
     cm.bindProcessToNetwork(null)
     netCb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
     netCb = null
