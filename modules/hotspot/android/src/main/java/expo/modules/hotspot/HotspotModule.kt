@@ -42,6 +42,8 @@ private const val GROUP_READY_MS = 15_000L
 private const val JOIN_START_DELAY_MS = 2_500L
 /** setBand 付きの要求がこの時間より早く onUnavailable になったら「setBand を OS に即拒否された」とみなす */
 private const val BAND_REJECT_FAST_MS = 5_000L
+/** 子機の参加で setBand(2.4GHz) を付けて要求するか。既定 false=最初から setBand なし(以前つながっていた状態)。true=付きで要求し、5 秒未満で拒否されたら setBand なしで再要求 */
+private const val JOIN_USE_BAND = false
 
 class HotspotModule : Module() {
   private var reservation: WifiManager.LocalOnlyHotspotReservation? = null
@@ -694,10 +696,11 @@ class HotspotModule : Module() {
     // OS が setBand 付きを即拒否する端末では、1 回だけ setBand なしでやり直し、成功した方式をプロセス内で覚える
     var usedBand = false
     if (bandFallback) DhLog.i(TAG, "joinWifi scan band=指定なし(setBand 拒否→なしで再要求)")
-    else if (Build.VERSION.SDK_INT >= 33 && joinBandPref != false) {
+    else if (JOIN_USE_BAND && Build.VERSION.SDK_INT >= 33 && joinBandPref != false) {
       try { sb.setBand(android.net.wifi.ScanResult.WIFI_BAND_24_GHZ); usedBand = true; DhLog.i(TAG, "joinWifi scan band=2.4GHz only") }
       catch (e: Throwable) { DhLog.w(TAG, "joinWifi setBand(2.4GHz) failed $e -> 帯域指定なし") }
-    } else if (Build.VERSION.SDK_INT >= 33) DhLog.i(TAG, "joinWifi scan band=指定なし(この端末は setBand 拒否と覚えている)")
+    } else if (!JOIN_USE_BAND) DhLog.i(TAG, "joinWifi scan band=指定なし(JOIN_USE_BAND=false)")
+    else if (Build.VERSION.SDK_INT >= 33) DhLog.i(TAG, "joinWifi scan band=指定なし(この端末は setBand 拒否と覚えている)")
     else DhLog.i(TAG, "joinWifi scan band=指定なし(API<33 は WifiNetworkSpecifier.setBand 不可)")
     val startedAt = SystemClock.elapsedRealtime()
     val spec = sb.build()
