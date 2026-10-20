@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 private const val TAG = "DH-P2P"
 private const val JOIN_TIMEOUT_MS = 25_000L
+private const val GROUP_READY_MS = 15_000L
 
 class HotspotModule : Module() {
   private var reservation: WifiManager.LocalOnlyHotspotReservation? = null
@@ -106,11 +107,8 @@ class HotspotModule : Module() {
       val cfg = b.build()
       // パスフレーズは出さない
       Log.i(TAG, "startDirect ssid=$name band=$band(requested freq=${freq ?: 0})")
-      // 以前のグループが残っていれば消してから作る
-      m.removeGroup(ch, object : WifiP2pManager.ActionListener {
-        override fun onSuccess() { Log.i(TAG, "removeGroup ok"); create(m, ch, cfg, name, pass, promise) }
-        override fun onFailure(reason: Int) { Log.i(TAG, "removeGroup none/failed reason=${reasonName(reason)} (グループが無ければ正常)"); create(m, ch, cfg, name, pass, promise) }
-      })
+      // 以前のグループが残っていれば消してから作る(BUSY のときは段階的に片付ける。手順と結果は DH-P2P のログ)
+      clearThenCreate(m, ch, cfg, name, pass, promise)
     }
     /**
      * グループを消し、P2P チャンネルも閉じる(閉じないと p2p0 が残り、LOHS の AP インターフェースを作れなくなる)。
@@ -336,22 +334,109 @@ class HotspotModule : Module() {
     else -> "reason=$r"
   }
 
-  private fun create(m: WifiP2pManager, ch: WifiP2pManager.Channel, cfg: WifiP2pConfig, name: String, pass: String, promise: Promise) {
+  /**
+   * 既存の group を消してから作る。removeGroup が BUSY のときは、
+   * (1) cancelConnect + stopPeerDiscovery → 1 秒待って removeGroup をやり直す
+   * (2) それでも BUSY なら persistent group を消し、チャンネルを作り直す
+   * ことを試してから createGroup する。
+   */
+  private fun clearThenCreate(m: WifiP2pManager, ch: WifiP2pManager.Channel, cfg: WifiP2pConfig, name: String, pass: String, promise: Promise) {
+    m.removeGroup(ch, object : WifiP2pManager.ActionListener {
+      override fun onSuccess() { Log.i(TAG, "removeGroup ok"); create(m, ch, cfg, name, pass, promise, 0) }
+      override fun onFailure(reason: Int) {
+        Log.i(TAG, "removeGroup failed reason=${reasonName(reason)} (グループが無ければ正常。BUSY なら片付けを試す)")
+        if (reason != WifiP2pManager.BUSY) { create(m, ch, cfg, name, pass, promise, 0); return }
+        Log.i(TAG, "cleanup step1: cancelConnect + stopPeerDiscovery")
+        runCatching { m.cancelConnect(ch, null) }
+        runCatching { m.stopPeerDiscovery(ch, null) }
+        mainHandler.postDelayed({
+          m.removeGroup(ch, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() { Log.i(TAG, "cleanup step1 removeGroup ok"); create(m, ch, cfg, name, pass, promise, 0) }
+            override fun onFailure(r2: Int) {
+              Log.w(TAG, "cleanup step1 removeGroup still failed reason=${reasonName(r2)} -> step2: delete persistent groups + re-initialize channel")
+              deletePersistentGroups(m, ch)
+              closeChannel(ch)
+              val ch2 = m.initialize(ctx, Looper.getMainLooper(), null)
+              p2pCh = ch2
+              mainHandler.postDelayed({
+                m.removeGroup(ch2, object : WifiP2pManager.ActionListener {
+                  override fun onSuccess() { Log.i(TAG, "cleanup step2 removeGroup ok"); create(m, ch2, cfg, name, pass, promise, 0) }
+                  override fun onFailure(r3: Int) { Log.w(TAG, "cleanup step2 removeGroup reason=${reasonName(r3)} -> createGroup anyway"); create(m, ch2, cfg, name, pass, promise, 0) }
+                })
+              }, 500L)
+            }
+          })
+        }, 1_000L)
+      }
+    })
+  }
+
+  /** 記憶された persistent group を消す(公開 API が無いので reflection。無い/失敗は無視) */
+  private fun deletePersistentGroups(m: WifiP2pManager, ch: WifiP2pManager.Channel) {
+    val method = runCatching { WifiP2pManager::class.java.getMethod("deletePersistentGroup", WifiP2pManager.Channel::class.java, Int::class.javaPrimitiveType, WifiP2pManager.ActionListener::class.java) }.getOrNull()
+    if (method == null) { Log.i(TAG, "deletePersistentGroup unavailable"); return }
+    for (id in 0..7) runCatching { method.invoke(m, ch, id, null) }
+    Log.i(TAG, "deletePersistentGroup requested for netId 0..7")
+  }
+
+  private fun create(m: WifiP2pManager, ch: WifiP2pManager.Channel, cfg: WifiP2pConfig, name: String, pass: String, promise: Promise, retry: Int) {
     try {
       m.createGroup(ch, cfg, object : WifiP2pManager.ActionListener {
         override fun onSuccess() {
-          Log.i(TAG, "createGroup ok ssid=$name")
-          logGroup(m, ch, name)
-          promise.resolve(mapOf("ssid" to name, "passphrase" to pass))
+          // ok は「要求が受け付けられた」だけ。group が実際にできる(GO になる)まで待ってから返す
+          Log.i(TAG, "createGroup accepted ssid=$name -> wait for group formed (max ${GROUP_READY_MS}ms)")
+          waitGroupReady(m, ch, name, pass, promise, android.os.SystemClock.elapsedRealtime() + GROUP_READY_MS, 0)
         }
         override fun onFailure(reason: Int) {
-          Log.w(TAG, "createGroup failed ssid=$name reason=${reasonName(reason)}")
+          Log.w(TAG, "createGroup failed ssid=$name reason=${reasonName(reason)} retry=$retry")
+          if (reason == WifiP2pManager.BUSY && retry < 1) {
+            runCatching { m.cancelConnect(ch, null) }
+            runCatching { m.stopPeerDiscovery(ch, null) }
+            m.removeGroup(ch, object : WifiP2pManager.ActionListener {
+              override fun onSuccess() = retryCreate()
+              override fun onFailure(r: Int) = retryCreate()
+              fun retryCreate() { mainHandler.postDelayed({ create(m, ch, cfg, name, pass, promise, retry + 1) }, 1_500L) }
+            })
+            return
+          }
           promise.reject("E_DIRECT", "createGroup failed: reason=${reasonName(reason)}", null)
         }
       })
     } catch (e: Exception) {
       Log.w(TAG, "createGroup exception ssid=$name $e")
       promise.reject("E_DIRECT", e.message ?: e.toString(), e)
+    }
+  }
+
+  /** requestGroupInfo を 500ms ごとに調べ、group が非 null・自分が GO・SSID 一致になったら準備完了として返す。期限までに揃わなければ失敗 */
+  @Suppress("MissingPermission")
+  private fun waitGroupReady(m: WifiP2pManager, ch: WifiP2pManager.Channel, want: String, pass: String, promise: Promise, deadline: Long, n: Int) {
+    try {
+      m.requestGroupInfo(ch) { g ->
+        val ok = g != null && g.isGroupOwner && g.networkName == want
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (ok) {
+          Log.i(TAG, "group ready ssid=$want after ${n * 500}ms (polls=${n + 1})")
+          logGroup(m, ch, want)
+          promise.resolve(mapOf("ssid" to want, "passphrase" to pass))
+        } else if (now < deadline) {
+          if (n % 4 == 0) Log.i(TAG, "waiting group: info=${if (g == null) "null" else "ssid=${g.networkName} isGO=${g.isGroupOwner}"} poll=$n")
+          mainHandler.postDelayed({ waitGroupReady(m, ch, want, pass, promise, deadline, n + 1) }, 500L)
+        } else {
+          val why = when {
+            g == null -> "formed=false のまま(requestGroupInfo null)"
+            !g.isGroupOwner -> "GO になっていない(ssid=${g.networkName})"
+            else -> "SSID 不一致 got=${g.networkName} want=$want"
+          }
+          Log.w(TAG, "group NOT ready after ${GROUP_READY_MS}ms: $why")
+          // 半端な状態を残さない
+          m.removeGroup(ch, null)
+          promise.reject("E_DIRECT", "group not formed within ${GROUP_READY_MS / 1000}s: $why", null)
+        }
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "requestGroupInfo exception $e")
+      promise.reject("E_DIRECT", "requestGroupInfo: ${e.message ?: e}", e)
     }
   }
 
