@@ -14,10 +14,11 @@ export const testRandomHex = (bytes: number) =>
   Array.from({ length: bytes }, () => ((n++ * 37 + 11) % 256).toString(16).padStart(2, '0')).join('');
 
 /** 端末の部品の偽物。呼び出しを calls に記録する。 */
-export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[] } = {}) {
+export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; joinFailTimes?: number; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[] } = {}) {
   const calls: string[] = [];
   const files: Record<string, string> = {};
   const wifiLost = new Set<() => void>();
+  let joinFails = o.joinFailTimes ?? 0;
   const vpnState = { running: false, permitted: true };
   const hotspot: HotspotPort = {
     startHotspot: async () => (calls.push('startHotspot'), { ssid: 'AndroidShare_1', passphrase: 'lohspass' }),
@@ -33,7 +34,11 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     socksSelfTest: async () => ({ ok: true, line: 'ok' }),
     startEcho: () => void calls.push('startEcho'),
     stopEcho: () => void calls.push('stopEcho'),
-    joinWifi: async (ssid) => (calls.push('join:' + ssid), { gateway: '192.168.49.1' }),
+    joinWifi: async (ssid) => {
+      calls.push('join:' + ssid);
+      if (joinFails > 0) { joinFails--; throw Object.assign(new Error('network not found or not approved'), { code: 'E_JOIN' }); }
+      return { gateway: '192.168.49.1' };
+    },
     leaveWifi: () => void calls.push('leaveWifi'),
     wifiFrequency: () => 0,
     hasCellular: () => o.cellular ?? false,

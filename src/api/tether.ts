@@ -30,7 +30,8 @@ type Wire =
   | { kind: 'tether.app'; body: unknown }
   | { kind: 'tether.wifi'; method: 'WifiDirect' | 'LocalOnlyHotspot'; ssid: string; pass: string; port: number; socks: Socks }
   | { kind: 'tether.wifi-result'; ok: boolean; gateway?: string; rttMs?: number; error?: string }
-  | { kind: 'tether.need-wifi' }
+  /** 接続情報の再送の依頼。rebuild があれば「Direct の作り直し」の依頼(子機の参加が E_JOIN で失敗したとき。1 回だけ) */
+  | { kind: 'tether.need-wifi'; rebuild?: { reason: string; attempt: number } }
   // 能力の交換と方式判断(docs/SPEC.md §9)。機種名と能力・判断だけを流す
   | { kind: 'tether.hello'; v: number; rev: string }
   | { kind: 'tether.caps-req'; v: number }
@@ -49,6 +50,8 @@ const ECHO_PORT = 9000;
 const SOCKS_PORT = 1080;
 /** 接続情報は古くなると意味がない。切断中に溜めすぎず、1 本だけ(最新)を 60 秒保持する */
 const WIFI_TTL_MS = 60_000;
+/** 子機が Direct の作り直しを頼んでから、新しい接続情報を待つ上限。過ぎたら従来どおり失敗として親機に伝える */
+const REBUILD_WAIT_MS = 90_000;
 
 const isWire = (x: unknown): x is Wire => typeof (x as any)?.kind === 'string' && (x as any).kind.startsWith('tether.');
 
@@ -79,6 +82,9 @@ export class Tether {
   private shareMsg: WifiMsg | null = null;
   private sharing = false;
   private joining = false;
+  /** 子機: 今回の接続で親機に Direct の作り直しを頼んだ回数(1 回まで)。参加できたら 0 に戻す */
+  private rebuildAsked = 0;
+  private rebuildTimer: ReturnType<typeof setTimeout> | null = null;
   private lastJoined: WifiMsg | null = null;
   private vpnHold = false;
   private offWifiLost: (() => void) | null = null;
@@ -392,6 +398,7 @@ export class Tether {
         this.offWifiLost = this.p.hotspot.onWifiLost(() => this.onWifiLost(gen));
         this.offJoinPrompt = this.p.hotspot.onJoinPrompt?.((e) => {
           if (gen !== this.gen) return;
+          // show だけが「案内を出す」。ok/declined/timeout/cancelled はどれも終わりなので案内を必ず消す
           this.set({ joinPrompt: e.phase === 'show' });
           this.log(`Wi-Fi 許可画面: ${e.phase}`);
         }) ?? null;
@@ -437,6 +444,8 @@ export class Tether {
     this.lastJoined = null;
     this.sharing = false;
     this.joining = false;
+    this.rebuildAsked = 0;
+    this.clearRebuildTimer();
     this.vpnHold = false;
     this.peerId = null;
     this.guestCaps = null;
@@ -799,7 +808,7 @@ export class Tether {
         }
         break;
       case 'tether.wifi':
-        if (role === 'guest') void this.join(gen, body, false);
+        if (role === 'guest') { this.clearRebuildTimer(); void this.join(gen, body, false); }
         break;
       case 'tether.hello':
         if (role === 'host') void this.onHello(gen, peerId, body.v, body.rev).catch((e) => this.log('hello 処理で例外: ' + (e?.message ?? e)));
@@ -821,9 +830,30 @@ export class Tether {
         }
         break;
       case 'tether.need-wifi':
-        if (role === 'host' && this.shareMsg) this.sendShare();
+        if (role !== 'host') break;
+        if (body.rebuild) this.onRebuildRequest(body.rebuild);
+        else if (this.shareMsg) this.sendShare();
         break;
     }
+  }
+
+  /**
+   * 子機から Direct の作り直しを頼まれた。いまのグループを消して(removeGroup。グループ無しの BUSY は native 側で確認済み)、
+   * 新しいグループを同じ手順(2.4GHz 固定など)で作り、新しい接続情報を送る。作り直しに失敗したら方式の順序どおり LOHS に落ちる。
+   */
+  private onRebuildRequest(r: { reason: string; attempt: number }): void {
+    const m = this.shareMsg?.method ?? null;
+    this.log(`[DH-P2P] Direct 作り直しの依頼を受信 reason=${r.reason} attempt=${r.attempt} 現在の方式=${m ?? '—'} 共有作成中=${this.sharing}`);
+    if (this.sharing) { this.log('[DH-P2P] 共有を作成中のため作り直しは見送り(完了後の接続情報が届く)'); return; }
+    if (m !== 'WifiDirect') { this.log('[DH-P2P] Direct の共有ではないので作り直さず接続情報を再送'); if (this.shareMsg) this.sendShare(); return; }
+    this.shareMsg = null;
+    this.set({ share: 'off', shareMethod: null });
+    void this.shareNow();
+  }
+
+  private clearRebuildTimer(): void {
+    if (this.rebuildTimer) clearTimeout(this.rebuildTimer);
+    this.rebuildTimer = null;
   }
 
   // ---------- 子機: 参加と VPN ----------
@@ -861,6 +891,7 @@ export class Tether {
       const { gateway } = await h.joinWifi(m.ssid, m.pass);
       if (gen !== this.gen) return;
       this.set({ wifi: 'joined' });
+      this.rebuildAsked = 0;
       // 親機のポートが開くのが少し遅れることがあるので、一定間隔で再試行する
       const retries = this.cfg.probeRetries ?? 10;
       let res = await h.probe(gateway, m.port);
@@ -878,11 +909,36 @@ export class Tether {
       if (gen !== this.gen) return;
       const msg = String(e?.message ?? e);
       this.log('参加失敗: ' + msg);
-      this.set({ wifi: 'failed', error: '親機の Wi-Fi に参加できませんでした: ' + msg });
-      this.link?.send({ kind: 'tether.wifi-result', ok: false, error: msg } satisfies Wire, { key: 'wifi-result', ttlMs: WIFI_TTL_MS });
+      this.set({ joinPrompt: false });
+      // E_JOIN(見つからない・期限切れ・拒否)で Direct なら、親機に Direct の作り直しを 1 回だけ頼み、新しい接続情報で参加し直す
+      if (this.canAskRebuild(e, m)) {
+        this.rebuildAsked++;
+        this.log(`[DH-P2P] 参加が E_JOIN で失敗 → 親機に Direct の作り直しを要求(${this.rebuildAsked}/1 回目) reason=${msg}`);
+        this.link?.send({ kind: 'tether.need-wifi', rebuild: { reason: 'E_JOIN', attempt: this.rebuildAsked } } satisfies Wire, { key: 'need-wifi', ttlMs: 30_000 });
+        this.clearRebuildTimer();
+        this.rebuildTimer = setTimeout(() => {
+          this.rebuildTimer = null;
+          if (gen !== this.gen || this.state.wifi !== 'joining') return;
+          this.log('[DH-P2P] 作り直し後の接続情報が届かない → 失敗として扱う');
+          this.failJoin('作り直しの接続情報が届きませんでした');
+        }, REBUILD_WAIT_MS);
+        return;
+      }
+      if (this.rebuildAsked > 0) this.log(`[DH-P2P] 作り直し後も参加に失敗 → 従来どおり失敗として親機に伝える(再要求は ${this.rebuildAsked}/1 回で打ち止め)`);
+      this.failJoin(msg);
     } finally {
       this.joining = false;
     }
+  }
+
+  private canAskRebuild(e: any, m: WifiMsg): boolean {
+    const isJoinErr = e?.code === 'E_JOIN' || /E_JOIN/.test(String(e?.message ?? ''));
+    return isJoinErr && m.method === 'WifiDirect' && this.rebuildAsked < 1 && this.state.link === 'connected' && !this.vpnHold;
+  }
+
+  private failJoin(msg: string): void {
+    this.set({ wifi: 'failed', error: '親機の Wi-Fi に参加できませんでした: ' + msg });
+    this.link?.send({ kind: 'tether.wifi-result', ok: false, error: msg } satisfies Wire, { key: 'wifi-result', ttlMs: WIFI_TTL_MS });
   }
 
   private async startVpn(gen: number, gateway: string, socks: Socks): Promise<void> {
