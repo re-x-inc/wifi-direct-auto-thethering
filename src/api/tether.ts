@@ -9,6 +9,7 @@ import {
   loadProbe, ProbeStore, removePeerData, sanitizeCapabilities, saveCapCache, saveProbe, PROTOCOL_VERSION, Tri,
 } from './capability';
 import { buildDiagnosticReport, DiagnosticReport, reportFileName, reportToJson, summarizeReport } from './diagnostics';
+import { joinFailureDetail, joinFailureText, parseJoinFailure } from './joinFailure';
 import { GuestEntry, isCompatibleVersion, LinkMethod, LinkPlan, parsePlan, planLink } from './planner';
 import {
   HandshakeEvent,
@@ -96,7 +97,7 @@ export class Tether {
       started: false, role: null, autoRole: this.detectRole(), peer: null,
       link: 'stopped', attempt: 0,
       share: 'off', shareMethod: null, peerReach: null,
-      wifi: 'off', joinPrompt: false, vpn: 'off', plan: null, pending: 0, error: null,
+      wifi: 'off', joinPrompt: false, joinFailure: null, vpn: 'off', plan: null, pending: 0, error: null,
     };
     // 子機: 前回の VPN が残っていたら、全通信を飲み込んだままにしないよう止める
     this.safeStopVpn();
@@ -442,7 +443,7 @@ export class Tether {
     this.todoDone.clear();
     const next: Partial<TetherState> = {
       started: false, role: null, peer: null, link: 'stopped', attempt: 0,
-      share: 'off', shareMethod: null, peerReach: null, wifi: 'off', joinPrompt: false, vpn: 'off', plan: null,
+      share: 'off', shareMethod: null, peerReach: null, wifi: 'off', joinPrompt: false, joinFailure: null, vpn: 'off', plan: null,
     };
     if (emit) this.set(next);
     else this.state = { ...this.state, ...next };
@@ -847,7 +848,7 @@ export class Tether {
     }
     this.joining = true;
     const h = this.p.hotspot;
-    this.set({ wifi: 'joining', error: null });
+    this.set({ wifi: 'joining', error: null, joinFailure: null });
     this.log(`接続情報を受信 ssid=${m.ssid} → 参加(端末の承認ダイアログが出たら許可)`);
     try {
       // 固定 SSID なら、承認ダイアログで「常に許可」を選んだ後は OS が覚える
@@ -871,7 +872,9 @@ export class Tether {
       if (gen !== this.gen) return;
       const msg = String(e?.message ?? e);
       this.log('参加失敗: ' + msg);
-      this.set({ wifi: 'failed', error: '親機の Wi-Fi に参加できませんでした: ' + msg });
+      const failure = parseJoinFailure(msg);
+      this.log(`参加失敗の理由: ${failure.reason} / ${joinFailureDetail(failure)}`);
+      this.set({ wifi: 'failed', error: joinFailureText(failure.reason), joinFailure: failure });
       this.link?.send({ kind: 'tether.wifi-result', ok: false, error: msg } satisfies Wire, { key: 'wifi-result', ttlMs: WIFI_TTL_MS });
     } finally {
       this.joining = false;

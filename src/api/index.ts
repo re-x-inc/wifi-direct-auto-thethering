@@ -6,6 +6,8 @@
 export { Tether } from './tether';
 export { getTether, nativePlatform } from './native';
 export { TetherError } from './types';
+export { joinFailureDetail, joinFailureText, parseJoinFailure } from './joinFailure';
+export type { JoinFailure, JoinFailureReason } from './joinFailure';
 export {
   buildCapabilities, capsRevision, describeCapabilities, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, sanitizeCapabilities,
 } from './capability';

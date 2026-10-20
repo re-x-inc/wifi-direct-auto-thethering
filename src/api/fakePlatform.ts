@@ -14,7 +14,7 @@ export const testRandomHex = (bytes: number) =>
   Array.from({ length: bytes }, () => ((n++ * 37 + 11) % 256).toString(16).padStart(2, '0')).join('');
 
 /** 端末の部品の偽物。呼び出しを calls に記録する。 */
-export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[] } = {}) {
+export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; joinError?: string; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[] } = {}) {
   const calls: string[] = [];
   const files: Record<string, string> = {};
   const wifiLost = new Set<() => void>();
@@ -33,7 +33,11 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     socksSelfTest: async () => ({ ok: true, line: 'ok' }),
     startEcho: () => void calls.push('startEcho'),
     stopEcho: () => void calls.push('stopEcho'),
-    joinWifi: async (ssid) => (calls.push('join:' + ssid), { gateway: '192.168.49.1' }),
+    joinWifi: async (ssid) => {
+      calls.push('join:' + ssid);
+      if (o.joinError) throw new Error(o.joinError);
+      return { gateway: '192.168.49.1' };
+    },
     leaveWifi: () => void calls.push('leaveWifi'),
     wifiFrequency: () => 0,
     hasCellular: () => o.cellular ?? false,
@@ -92,10 +96,10 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
 }
 
 /** 両端末に同じ共有コードのペアを入れた、親機・子機の偽プラットフォーム(fakeNearbyPair の端末名に合わせる) */
-export async function pairedFakes() {
+export async function pairedFakes(guestOpts: { joinError?: string } = {}) {
   const net = fakeNearbyPair();
   const host = fakePlatform(net.host, { cellular: true });
-  const guest = fakePlatform(net.guest, { cellular: false });
+  const guest = fakePlatform(net.guest, { cellular: false, ...guestOpts });
   const seed = async (p: TetherPlatform, self: string, peer: string) => {
     await p.kv.set('identity.v1', JSON.stringify({ id: self, name: self }));
     await p.kv.set('pairs.v1', JSON.stringify([{ peerId: peer, peerName: peer, secret: 'shared-secret', createdAt: 1 }]));
