@@ -53,6 +53,8 @@ export class NearbyTransport implements Transport {
   connect(): Promise<void> {
     const { api, o } = this;
     const myNonce = (o.nonce ?? (() => api.hmac(o.pair.secret, `${Date.now()}:${Math.random()}`)))();
+    // 前回の接続の残骸(GMS が ALREADY_CONNECTED と思い込む)を、始める前に一掃する
+    api.stop();
 
     return new Promise<void>((resolve, reject) => {
       const fail = (msg: string) => {
@@ -73,6 +75,8 @@ export class NearbyTransport implements Transport {
           }
         }),
         api.on('onInitiated', (e) => {
+          // ペアリング中の相手(P|…)の接続要求は、リンクの対象外。断らずに無視する(ペアリング側が処理する)
+          if (e.name?.startsWith('P|')) return;
           if (this.endpoint || e.name !== o.pair.peerId) {
             console.log(`[DH] 拒否 role=${o.role} ep=${e.endpointId} name=${e.name} want=${o.pair.peerId} 既存=${this.endpoint ?? '-'}`);
             return api.reject(e.endpointId);

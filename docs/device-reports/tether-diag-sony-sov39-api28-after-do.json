@@ -1,0 +1,912 @@
+{
+  "schema": 1,
+  "createdAt": 1792462636568,
+  "deviceKey": "sony-sov39-api28",
+  "capabilities": {
+    "v": 1,
+    "features": [
+      "link-plan"
+    ],
+    "device": {
+      "manufacturer": "Sony",
+      "model": "SOV39",
+      "sdk": 28,
+      "release": "9",
+      "batteryPercent": 9,
+      "batteryOptimizationExempt": false
+    },
+    "network": {
+      "cellular": false
+    },
+    "radio": {
+      "wifiDirect": true,
+      "lohs": null,
+      "staP2pConcurrent": null,
+      "staApConcurrent": null,
+      "p2pApCoexist": null,
+      "staLocalOnlyConcurrent": null,
+      "band24": null,
+      "band5": true
+    },
+    "state": {
+      "vpnConsent": false,
+      "deviceOwner": false,
+      "alwaysOnVpn": null,
+      "missingPermissions": []
+    },
+    "source": {
+      "wifiDirect": "api",
+      "band5": "api"
+    },
+    "collectedAt": 1792462636566
+  },
+  "sections": {
+    "build": {
+      "manufacturer": {
+        "v": "Sony",
+        "minApi": null,
+        "source": "api"
+      },
+      "brand": {
+        "v": "KDDI",
+        "minApi": null,
+        "source": "api"
+      },
+      "model": {
+        "v": "SOV39",
+        "minApi": null,
+        "source": "api"
+      },
+      "device": {
+        "v": "SOV39",
+        "minApi": null,
+        "source": "api"
+      },
+      "product": {
+        "v": "SOV39_jp_kdi",
+        "minApi": null,
+        "source": "api"
+      },
+      "hardware": {
+        "v": "qcom",
+        "minApi": null,
+        "source": "api"
+      },
+      "board": {
+        "v": "sdm845",
+        "minApi": null,
+        "source": "api"
+      },
+      "sdkInt": {
+        "v": 28,
+        "minApi": null,
+        "source": "api"
+      },
+      "release": {
+        "v": "9",
+        "minApi": null,
+        "source": "api"
+      },
+      "codename": {
+        "v": "REL",
+        "minApi": null,
+        "source": "api"
+      },
+      "securityPatch": {
+        "v": "2018-09-01",
+        "minApi": 23,
+        "source": "api"
+      },
+      "previewSdkInt": {
+        "v": 0,
+        "minApi": 23,
+        "source": "api"
+      },
+      "buildId": {
+        "v": "52.0.C.0.372",
+        "minApi": null,
+        "source": "api"
+      },
+      "display": {
+        "v": "52.0.C.0.372",
+        "minApi": null,
+        "source": "api"
+      },
+      "type": {
+        "v": "user",
+        "minApi": null,
+        "source": "api"
+      },
+      "tags": {
+        "v": "release-keys",
+        "minApi": null,
+        "source": "api"
+      },
+      "fingerprint": {
+        "v": "KDDI/SOV39_jp_kdi/SOV39:9/52.0.C.0.372/2770825181:user/release-keys",
+        "minApi": null,
+        "source": "api"
+      },
+      "supportedAbis": {
+        "v": [
+          "arm64-v8a",
+          "armeabi-v7a",
+          "armeabi"
+        ],
+        "minApi": 21,
+        "source": "api"
+      },
+      "supported64BitAbis": {
+        "v": [
+          "arm64-v8a"
+        ],
+        "minApi": 21,
+        "source": "api"
+      },
+      "radioVersion": {
+        "v": "845-sdm845.gen.prodQ-00006-01",
+        "minApi": null,
+        "source": "api"
+      }
+    },
+    "app": {
+      "packageName": {
+        "v": "info.rex.tether",
+        "minApi": null,
+        "source": "api"
+      },
+      "versionName": {
+        "v": "0.1.0",
+        "minApi": null,
+        "source": "api"
+      },
+      "versionCode": {
+        "v": 1,
+        "minApi": null,
+        "source": "api"
+      },
+      "targetSdk": {
+        "v": 36,
+        "minApi": null,
+        "source": "api"
+      }
+    },
+    "wifi": {
+      "wifiEnabled": {
+        "v": true,
+        "minApi": null,
+        "source": "api"
+      },
+      "band24": {
+        "v": null,
+        "minApi": 31,
+        "source": "api",
+        "why": "sdk<31"
+      },
+      "band5": {
+        "v": true,
+        "minApi": 21,
+        "source": "api"
+      },
+      "band6": {
+        "v": null,
+        "minApi": 30,
+        "source": "api",
+        "why": "sdk<30"
+      },
+      "band60": {
+        "v": null,
+        "minApi": 31,
+        "source": "api",
+        "why": "sdk<31"
+      },
+      "standardsSupported": {
+        "v": null,
+        "minApi": 30,
+        "source": "api",
+        "why": "sdk<30"
+      },
+      "p2pSupported": {
+        "v": true,
+        "minApi": 21,
+        "source": "api"
+      },
+      "staApConcurrent": {
+        "v": null,
+        "minApi": 30,
+        "source": "api",
+        "why": "sdk<30"
+      },
+      "staConcurrentLocalOnly": {
+        "v": null,
+        "minApi": 31,
+        "source": "api",
+        "why": "sdk<31"
+      },
+      "staConcurrentMultiInternet": {
+        "v": null,
+        "minApi": 33,
+        "source": "api",
+        "why": "sdk<33"
+      },
+      "bridgedApConcurrent": {
+        "v": null,
+        "minApi": 31,
+        "source": "api",
+        "why": "sdk<31"
+      },
+      "staBridgedApConcurrent": {
+        "v": null,
+        "minApi": 31,
+        "source": "api",
+        "why": "sdk<31"
+      },
+      "dualBandSimultaneous": {
+        "v": null,
+        "minApi": 34,
+        "source": "api",
+        "why": "sdk<34"
+      },
+      "makeBeforeBreakSwitching": {
+        "v": null,
+        "minApi": 31,
+        "source": "api",
+        "why": "sdk<31"
+      },
+      "tdls": {
+        "v": true,
+        "minApi": 21,
+        "source": "api"
+      },
+      "preferredNetworkOffload": {
+        "v": true,
+        "minApi": 21,
+        "source": "api"
+      },
+      "deviceToApRtt": {
+        "v": false,
+        "minApi": 21,
+        "source": "api"
+      },
+      "enhancedPowerReporting": {
+        "v": true,
+        "minApi": 21,
+        "source": "api"
+      },
+      "easyConnect": {
+        "v": null,
+        "minApi": 29,
+        "source": "api",
+        "why": "sdk<29"
+      },
+      "enhancedOpen": {
+        "v": null,
+        "minApi": 29,
+        "source": "api",
+        "why": "sdk<29"
+      },
+      "wpa3Sae": {
+        "v": null,
+        "minApi": 29,
+        "source": "api",
+        "why": "sdk<29"
+      },
+      "wpa3SuiteB": {
+        "v": null,
+        "minApi": 29,
+        "source": "api",
+        "why": "sdk<29"
+      },
+      "wpa3SaeH2e": {
+        "v": null,
+        "minApi": 31,
+        "source": "api",
+        "why": "sdk<31"
+      },
+      "wapi": {
+        "v": null,
+        "minApi": 30,
+        "source": "api",
+        "why": "sdk<30"
+      },
+      "wep": {
+        "v": null,
+        "minApi": 35,
+        "source": "api",
+        "why": "sdk<35"
+      },
+      "decoratedIdentity": {
+        "v": null,
+        "minApi": 31,
+        "source": "api",
+        "why": "sdk<31"
+      },
+      "trustOnFirstUse": {
+        "v": null,
+        "minApi": 33,
+        "source": "api",
+        "why": "sdk<33"
+      },
+      "scanThrottleEnabled": {
+        "v": null,
+        "minApi": 30,
+        "source": "api",
+        "why": "sdk<30"
+      },
+      "maxSuggestionsPerApp": {
+        "v": null,
+        "minApi": 29,
+        "source": "api",
+        "why": "sdk<29"
+      },
+      "maxSignalLevel": {
+        "v": null,
+        "minApi": 30,
+        "source": "api",
+        "why": "sdk<30"
+      }
+    },
+    "wifiP2p": {
+      "service": {
+        "v": true,
+        "minApi": null,
+        "source": "api"
+      },
+      "channelConstrainedDiscovery": {
+        "v": null,
+        "minApi": 33,
+        "source": "api",
+        "why": "sdk<33"
+      },
+      "setVendorElements": {
+        "v": null,
+        "minApi": 33,
+        "source": "api",
+        "why": "sdk<33"
+      },
+      "groupClientRemoval": {
+        "v": null,
+        "minApi": 33,
+        "source": "api",
+        "why": "sdk<33"
+      },
+      "groupOwnerIPv6LinkLocal": {
+        "v": null,
+        "minApi": 34,
+        "source": "api",
+        "why": "sdk<34"
+      },
+      "wifiDirectR2": {
+        "v": null,
+        "minApi": 36,
+        "source": "api",
+        "why": "sdk<36"
+      },
+      "pccMode": {
+        "v": null,
+        "minApi": 36,
+        "source": "api",
+        "why": "sdk<36"
+      }
+    },
+    "wifiAwareRtt": {
+      "awareAvailable": {
+        "v": null,
+        "minApi": 26,
+        "source": "api",
+        "why": "ex:NullPointerException"
+      },
+      "awareMaxServiceNameLength": {
+        "v": null,
+        "minApi": 26,
+        "source": "api",
+        "why": "ex:NullPointerException"
+      },
+      "awareMaxServiceSpecificInfoLength": {
+        "v": null,
+        "minApi": 26,
+        "source": "api",
+        "why": "ex:NullPointerException"
+      },
+      "awareInstantCommunicationEnabled": {
+        "v": null,
+        "minApi": 31,
+        "source": "api",
+        "why": "sdk<31"
+      },
+      "rttAvailable": {
+        "v": null,
+        "minApi": 28,
+        "source": "api",
+        "why": "ex:NullPointerException"
+      }
+    },
+    "bluetooth": {
+      "adapterPresent": {
+        "v": true,
+        "minApi": null,
+        "source": "api"
+      },
+      "state": {
+        "v": "on",
+        "minApi": null,
+        "source": "api"
+      },
+      "le2MPhy": {
+        "v": true,
+        "minApi": 26,
+        "source": "api"
+      },
+      "leCodedPhy": {
+        "v": false,
+        "minApi": 26,
+        "source": "api"
+      },
+      "leExtendedAdvertising": {
+        "v": true,
+        "minApi": 26,
+        "source": "api"
+      },
+      "lePeriodicAdvertising": {
+        "v": true,
+        "minApi": 26,
+        "source": "api"
+      },
+      "leMaxAdvertisingDataLength": {
+        "v": 1650,
+        "minApi": 26,
+        "source": "api"
+      },
+      "multipleAdvertisement": {
+        "v": true,
+        "minApi": 21,
+        "source": "api"
+      },
+      "offloadedFiltering": {
+        "v": true,
+        "minApi": 21,
+        "source": "api"
+      },
+      "offloadedScanBatching": {
+        "v": true,
+        "minApi": 21,
+        "source": "api"
+      }
+    },
+    "nfcUwb": {
+      "nfcAdapterPresent": {
+        "v": true,
+        "minApi": null,
+        "source": "api"
+      },
+      "nfcEnabled": {
+        "v": true,
+        "minApi": null,
+        "source": "api"
+      },
+      "secureNfcSupported": {
+        "v": null,
+        "minApi": 29,
+        "source": "api",
+        "why": "sdk<29"
+      },
+      "uwbFeature": {
+        "v": null,
+        "minApi": 34,
+        "source": "api",
+        "why": "sdk<34"
+      }
+    },
+    "cellular": {
+      "telephonyService": {
+        "v": true,
+        "minApi": null,
+        "source": "api"
+      },
+      "phoneType": {
+        "v": "gsm",
+        "minApi": null,
+        "source": "api"
+      },
+      "simState": {
+        "v": "absent",
+        "minApi": null,
+        "source": "api"
+      },
+      "voiceCapable": {
+        "v": true,
+        "minApi": 22,
+        "source": "api"
+      },
+      "smsCapable": {
+        "v": true,
+        "minApi": null,
+        "source": "api"
+      },
+      "dataCapable": {
+        "v": null,
+        "minApi": 31,
+        "source": "api",
+        "why": "sdk<31"
+      },
+      "dataEnabled": {
+        "v": false,
+        "minApi": 26,
+        "source": "api"
+      },
+      "dataNetworkType": {
+        "v": null,
+        "minApi": 24,
+        "source": "api",
+        "why": "ex:SecurityException"
+      },
+      "multiSimSupported": {
+        "v": null,
+        "minApi": 29,
+        "source": "api",
+        "why": "sdk<29"
+      },
+      "activeModemCount": {
+        "v": null,
+        "minApi": 30,
+        "source": "api",
+        "why": "sdk<30"
+      },
+      "supportedModemCount": {
+        "v": null,
+        "minApi": 30,
+        "source": "api",
+        "why": "sdk<30"
+      },
+      "rttSupported": {
+        "v": null,
+        "minApi": 29,
+        "source": "api",
+        "why": "sdk<29"
+      },
+      "tetherWifiRegexCount": {
+        "v": 1,
+        "minApi": null,
+        "source": "api",
+        "official": false
+      },
+      "tetherBluetoothRegexCount": {
+        "v": 2,
+        "minApi": null,
+        "source": "api",
+        "official": false
+      },
+      "tetherUsbRegexCount": {
+        "v": 2,
+        "minApi": null,
+        "source": "api",
+        "official": false
+      }
+    },
+    "power": {
+      "batteryPercent": {
+        "v": 9,
+        "minApi": null,
+        "source": "api"
+      },
+      "batteryStatus": {
+        "v": 2,
+        "minApi": null,
+        "source": "api"
+      },
+      "batteryPlugged": {
+        "v": 1,
+        "minApi": null,
+        "source": "api"
+      },
+      "batteryHealth": {
+        "v": 2,
+        "minApi": null,
+        "source": "api"
+      },
+      "batteryTemperatureDeciC": {
+        "v": 375,
+        "minApi": null,
+        "source": "api"
+      },
+      "isCharging": {
+        "v": true,
+        "minApi": 23,
+        "source": "api"
+      },
+      "powerSaveMode": {
+        "v": false,
+        "minApi": 21,
+        "source": "api"
+      },
+      "deviceIdleMode": {
+        "v": false,
+        "minApi": 23,
+        "source": "api"
+      },
+      "deviceLightIdleMode": {
+        "v": null,
+        "minApi": 33,
+        "source": "api",
+        "why": "sdk<33"
+      },
+      "lowPowerStandbyEnabled": {
+        "v": null,
+        "minApi": 33,
+        "source": "api",
+        "why": "sdk<33"
+      },
+      "interactive": {
+        "v": true,
+        "minApi": 20,
+        "source": "api"
+      },
+      "ignoringBatteryOptimizations": {
+        "v": false,
+        "minApi": 23,
+        "source": "api"
+      },
+      "thermalStatus": {
+        "v": null,
+        "minApi": 29,
+        "source": "api",
+        "why": "sdk<29"
+      },
+      "sustainedPerformanceSupported": {
+        "v": false,
+        "minApi": 24,
+        "source": "api"
+      },
+      "appStandbyBucket": {
+        "v": "active",
+        "minApi": 28,
+        "source": "api"
+      },
+      "backgroundRestricted": {
+        "v": false,
+        "minApi": 28,
+        "source": "api"
+      },
+      "restrictBackgroundStatus": {
+        "v": "disabled",
+        "minApi": 24,
+        "source": "api"
+      }
+    },
+    "permissions": {
+      "declared": {
+        "v": [
+          "android.permission.SYSTEM_ALERT_WINDOW",
+          "android.permission.INTERNET",
+          "android.permission.READ_EXTERNAL_STORAGE",
+          "android.permission.VIBRATE",
+          "android.permission.WRITE_EXTERNAL_STORAGE",
+          "android.permission.ACCESS_LOCAL_NETWORK",
+          "android.permission.ACCESS_WIFI_STATE",
+          "android.permission.CHANGE_WIFI_STATE",
+          "android.permission.CHANGE_NETWORK_STATE",
+          "android.permission.ACCESS_NETWORK_STATE",
+          "android.permission.ACCESS_FINE_LOCATION",
+          "android.permission.NEARBY_WIFI_DEVICES",
+          "android.permission.FOREGROUND_SERVICE",
+          "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE",
+          "android.permission.POST_NOTIFICATIONS",
+          "android.permission.BLUETOOTH",
+          "android.permission.BLUETOOTH_ADMIN",
+          "android.permission.ACCESS_COARSE_LOCATION",
+          "android.permission.BLUETOOTH_ADVERTISE",
+          "android.permission.BLUETOOTH_CONNECT",
+          "android.permission.BLUETOOTH_SCAN",
+          "android.permission.USE_BIOMETRIC",
+          "android.permission.USE_FINGERPRINT",
+          "info.rex.tether.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+        ],
+        "minApi": null,
+        "source": "api"
+      },
+      "granted": {
+        "v": [
+          "android.permission.INTERNET",
+          "android.permission.VIBRATE",
+          "android.permission.ACCESS_WIFI_STATE",
+          "android.permission.CHANGE_WIFI_STATE",
+          "android.permission.CHANGE_NETWORK_STATE",
+          "android.permission.ACCESS_NETWORK_STATE",
+          "android.permission.ACCESS_FINE_LOCATION",
+          "android.permission.FOREGROUND_SERVICE",
+          "android.permission.BLUETOOTH",
+          "android.permission.BLUETOOTH_ADMIN",
+          "android.permission.USE_BIOMETRIC",
+          "android.permission.USE_FINGERPRINT",
+          "info.rex.tether.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+        ],
+        "minApi": null,
+        "source": "api"
+      },
+      "denied": {
+        "v": [
+          "android.permission.SYSTEM_ALERT_WINDOW",
+          "android.permission.READ_EXTERNAL_STORAGE",
+          "android.permission.WRITE_EXTERNAL_STORAGE",
+          "android.permission.ACCESS_LOCAL_NETWORK",
+          "android.permission.NEARBY_WIFI_DEVICES",
+          "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE",
+          "android.permission.POST_NOTIFICATIONS",
+          "android.permission.ACCESS_COARSE_LOCATION",
+          "android.permission.BLUETOOTH_ADVERTISE",
+          "android.permission.BLUETOOTH_CONNECT",
+          "android.permission.BLUETOOTH_SCAN"
+        ],
+        "minApi": null,
+        "source": "api"
+      }
+    },
+    "vpn": {
+      "consentGiven": {
+        "v": false,
+        "minApi": 14,
+        "source": "api"
+      },
+      "alwaysOnThisApp": {
+        "v": null,
+        "minApi": 29,
+        "source": "api",
+        "why": "sdk<29"
+      },
+      "alwaysOnPackage": {
+        "v": "info.rex.deliveryhelper",
+        "minApi": null,
+        "source": "api",
+        "official": false
+      },
+      "otherVpnActive": {
+        "v": false,
+        "minApi": 23,
+        "source": "api"
+      }
+    },
+    "dpc": {
+      "deviceOwnerThisApp": {
+        "v": false,
+        "minApi": 18,
+        "source": "api"
+      },
+      "profileOwnerThisApp": {
+        "v": false,
+        "minApi": 21,
+        "source": "api"
+      },
+      "activeAdminCount": {
+        "v": 2,
+        "minApi": 8,
+        "source": "api"
+      },
+      "orgOwnedWithManagedProfile": {
+        "v": null,
+        "minApi": 30,
+        "source": "api",
+        "why": "sdk<30"
+      },
+      "isManagedProfile": {
+        "v": null,
+        "minApi": 30,
+        "source": "api",
+        "why": "sdk<30"
+      },
+      "isSystemUser": {
+        "v": true,
+        "minApi": 23,
+        "source": "api"
+      },
+      "isDemoUser": {
+        "v": false,
+        "minApi": 25,
+        "source": "api"
+      }
+    },
+    "features": {
+      "present": {
+        "v": [
+          "android.hardware.bluetooth",
+          "android.hardware.bluetooth_le",
+          "android.hardware.location",
+          "android.hardware.location.gps",
+          "android.hardware.location.network",
+          "android.hardware.nfc",
+          "android.hardware.nfc.any",
+          "android.hardware.nfc.hce",
+          "android.hardware.telephony",
+          "android.hardware.telephony.cdma",
+          "android.hardware.telephony.gsm",
+          "android.hardware.usb.accessory",
+          "android.hardware.usb.host",
+          "android.hardware.wifi",
+          "android.hardware.wifi.direct",
+          "android.hardware.wifi.passpoint",
+          "android.software.companion_device_setup",
+          "android.software.connectionservice",
+          "android.software.device_admin",
+          "android.software.managed_users",
+          "android.software.sip",
+          "android.software.sip.voip",
+          "android.software.verified_boot"
+        ],
+        "minApi": null,
+        "source": "api"
+      },
+      "queried": {
+        "v": {
+          "android.hardware.wifi": true,
+          "android.hardware.wifi.direct": true,
+          "android.hardware.wifi.aware": false,
+          "android.hardware.wifi.rtt": false,
+          "android.hardware.wifi.passpoint": true,
+          "android.hardware.bluetooth": true,
+          "android.hardware.bluetooth_le": true,
+          "android.hardware.nfc": true,
+          "android.hardware.nfc.hce": true,
+          "android.hardware.uwb": false,
+          "android.hardware.telephony": true,
+          "android.hardware.telephony.data": false,
+          "android.hardware.telephony.messaging": false,
+          "android.hardware.telephony.subscription": false,
+          "android.hardware.telephony.radio.access": false,
+          "android.hardware.telephony.calling": false,
+          "android.hardware.telephony.ims": false,
+          "android.hardware.telephony.euicc": false,
+          "android.hardware.telephony.gsm": true,
+          "android.hardware.telephony.cdma": true,
+          "android.hardware.ethernet": false,
+          "android.hardware.usb.host": true,
+          "android.hardware.usb.accessory": true,
+          "android.hardware.location.gps": true,
+          "android.hardware.thread_network": false,
+          "android.software.device_admin": true,
+          "android.software.managed_users": true,
+          "android.software.secure_lock_screen": false,
+          "android.software.ipsec_tunnels": false,
+          "android.software.companion_device_setup": true
+        },
+        "minApi": null,
+        "source": "api"
+      }
+    },
+    "network": {
+      "networks": {
+        "v": [],
+        "minApi": 23,
+        "source": "api"
+      },
+      "activeNetworkMetered": {
+        "v": true,
+        "minApi": 16,
+        "source": "api"
+      },
+      "defaultNetworkActive": {
+        "v": true,
+        "minApi": 21,
+        "source": "api"
+      }
+    },
+    "probe": {
+      "lohsCreated": {
+        "v": null,
+        "minApi": 26,
+        "source": "probe",
+        "why": "not-probed"
+      },
+      "staP2pConcurrent": {
+        "v": null,
+        "minApi": null,
+        "source": "observed",
+        "why": "not-observed"
+      },
+      "p2pApCoexist": {
+        "v": null,
+        "minApi": null,
+        "source": "observed",
+        "why": "not-observed"
+      }
+    }
+  }
+}

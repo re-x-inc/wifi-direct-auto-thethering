@@ -1,4 +1,4 @@
-import { Identity, KeyValue, Pair } from './types';
+import { Identity, KeyValue, Pair, labelOf } from './types';
 
 const PAIRS = 'pairs.v1';
 const IDENTITY = 'identity.v1';
@@ -38,7 +38,7 @@ export async function getIdentity(kv: KeyValue, randomHex: (bytes: number) => st
     } catch {}
   }
   const id = 'T' + randomHex(4);
-  const identity = { id, name: `端末-${id.slice(-4).toUpperCase()}` };
+  const identity = { id, name: labelOf(id) };
   await kv.set(IDENTITY, JSON.stringify(identity));
   return identity;
 }

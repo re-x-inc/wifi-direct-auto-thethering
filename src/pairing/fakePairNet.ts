@@ -21,11 +21,11 @@ export function fakePairNet(digits = '4821') {
       emit: (ev, e) => h.get(ev)?.forEach((cb) => cb(e)),
       advertise(n) { side.name = n; side.advertising = true; find(); },
       discover() { side.discovering = true; find(); },
-      requestConnect() {
+      requestConnect(_ep, myName) {
         queueMicrotask(() => {
           const me = sides[id], other = sides[peerId];
           me.emit('onInitiated', { endpointId: peerId, name: other.name, digits, incoming: false });
-          other.emit('onInitiated', { endpointId: id, name: me.name, digits, incoming: true });
+          other.emit('onInitiated', { endpointId: id, name: myName ?? me.name, digits, incoming: true });
         });
       },
       accept() {

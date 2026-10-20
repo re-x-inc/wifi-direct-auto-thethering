@@ -352,8 +352,8 @@ class NearbyLinkModule : Module() {
       pairing = name.startsWith("P|")
       if (!pairing) touchLink()
       // 停止→再開始で前回の広告が残っていると ALREADY_ADVERTISING になるため、先に止める(同じ client への呼び出しは順序どおり処理される)
-      // 前回の接続の残骸(GMS が ALREADY_CONNECTED と思い込む)を一掃してから始める
-      client.stopAllEndpoints()
+      // stopAllEndpoints はクライアント全体のリセットなので、ここでは呼ばない(advertise の直後に discover を呼ぶと、広告が消える)。
+      // 残骸の一掃は、呼び出し側が最初に1回だけ stop() で行う
       advName = name
       startAdv(name)
       mainHandler.removeCallbacks(powerTick)
@@ -362,7 +362,6 @@ class NearbyLinkModule : Module() {
     Function("discover") {
       if (!pairing) touchLink()
       clearRediscover()
-      client.stopAllEndpoints()
       client.stopDiscovery()
       discovering = true
       startDisc()
