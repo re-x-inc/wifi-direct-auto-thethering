@@ -286,8 +286,7 @@ test('バスの生存信号だけが進んでも、onLink / subscribe の購読�
   const c = await setup();
   await established(c);
   await until(() => c.bus!.isUp());
-  c.stopEcho();
-  await wait(100); // 遷移・Echo 停止の余波を落ち着かせる
+  await wait(100); // 遷移の余波を落ち着かせる
   const a0 = c.hostT.linkSnapshot().path.lastAliveAt as number;
   const links: number[] = [];
   const states: Array<number | null> = [];
