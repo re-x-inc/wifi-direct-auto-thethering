@@ -64,7 +64,7 @@ comparisonMarkdown([reportA, reportB], /* onlyDiffs */ true); // 機種比較の
 
 詳細・状態遷移図・閾値・クラス設計は [LINK_STATE.md](LINK_STATE.md)。
 
-- `TetherConfig.nearbyWhileDirect: 'keep' | 'suspend'`(既定 `'keep'`)。`'suspend'` は Direct が張れている間 Nearby の広告・探索・接続を止め、Direct が切れたときだけ再開する。両端末で同じ値にする。`directGuard`(echoMs / directMs / nearbyMs / hbIntervalMs / tickMs)・`directRetry`(attempts / backoffMs / joinTimeoutMs / attemptMs)で時間を変えられる。
+- `TetherConfig.nearbyWhileDirect: 'keep' | 'suspend'`(既定 `'keep'`)。`'suspend'` は Direct が張れている間 Nearby の広告・探索・接続を止め、Direct が切れたときだけ再開する。これは自分の希望で、実効の方式は hello の交換で決まる(両方 suspend のときだけ suspend。docs/LINK_STATE.md「方式の交換」)。`directGuard`(echoMs / directMs / nearbyMs / hbIntervalMs / tickMs)・`directRetry`(attempts / backoffMs / joinTimeoutMs / attemptMs)で時間を変えられる。
 - `TetherState.nearby`: `'up' | 'down' | 'suspended'`(`suspended` は意図した停止で異常ではない)。
 - `TetherState.overall`: `'connected' | 'degraded' | 'disconnected'`。**データ経路だけ**から導く(Nearby の link には依存しない)。`Tether.onOverall(cb)` で変化を購読できる。
 - `TetherConfig.hbScreenOffIntervalMs`(省略=延ばさない)/ `hbWakeLock`(既定 true): 子機のハートビートはネイティブ(Hotspot モジュールの専用スレッド)で続き、JS が止まっても送る。画面オフ中だけ間隔を延ばす値(T_echo の半分まで)と、動作中 PARTIAL_WAKE_LOCK を持つかの指定。ネイティブ側が無い部品では従来の JS ループで動く。ログのタグ: `DH-HB`(logcat)、`[DH-LINK] ネイティブのハートビート…`。

@@ -6,6 +6,7 @@ import type { DirectRetry } from '../link/directGuard';
 import { GuardAction, GuardEvent, nearbyShouldBeOff } from '../link/directGuard';
 import { LinkStateInfo } from '../link/stateLabels';
 import { LinkTimingConfig, pickShared, resolveTiming, toGuardTiming, toRetry } from '../link/timingConfig';
+import { asMode, decideLinkMode, DEFAULT_NEARBY_WHILE_DIRECT, describeLinkMode, LinkModeInfo, NearbyWhileDirect, PeerMode } from '../link/linkMode';
 import { LinkContext, LinkGovernor, LinkSnapshot } from '../link/linkGovernor';
 import { NearbyControl } from '../link/transport';
 import type { NearbyApi } from '../link/nearbyTransport';
@@ -43,17 +44,19 @@ type Wire =
   | { kind: 'tether.wifi'; method: 'WifiDirect' | 'LocalOnlyHotspot'; ssid: string; pass: string; port: number; socks: Socks;
       /** 親機が Nearby を閉じて Direct グループを作り直す。子機も Nearby を閉じ、この情報で参加を繰り返し試す(suspend 方式) */
       rebuild?: boolean }
-  | { kind: 'tether.wifi-result'; ok: boolean; gateway?: string; rttMs?: number; error?: string; /** 子機が suspend 方式で動いている(親機は両方 suspend のときだけ Nearby を止める) */ suspend?: boolean }
+  | { kind: 'tether.wifi-result'; ok: boolean; gateway?: string; rttMs?: number; error?: string; /** 後方互換(#20 の親機向け): 子機が suspend 方式で動いている。方式の交換(hello の nwd)が成立すれば冗長。旧親機が残る間は送り続ける */ suspend?: boolean }
   | { kind: 'tether.need-wifi' }
   // 子機が自分でペア解除するときの通知(best-effort)。親機は該当ペアを消す
   | { kind: 'tether.unpair' }
   // 能力の交換と方式判断(docs/SPEC.md §9)。機種名と能力・判断だけを流す
-  | { kind: 'tether.hello'; v: number; rev: string }
+  // nwd: 自分の希望(nearbyWhileDirect)、tv: 共有 timing の版(無ければ旧版)。名乗りなし = 旧版 = keep として扱う
+  | { kind: 'tether.hello'; v: number; rev: string; nwd?: NearbyWhileDirect; tv?: number }
   | { kind: 'tether.caps-req'; v: number }
   | { kind: 'tether.caps'; v: number; rev: string; caps: Capabilities }
   | { kind: 'tether.plan'; v: number; plan: LinkPlan }
   // 親機が正の時間設定（閾値の対応関係が崩れないよう、親機から子機へ配る）
-  | { kind: 'tether.timing'; v: 1; timing: Record<string, unknown> };
+  // mode: 親機が決めた実効方式(hello への返答。無ければ keep)
+  | { kind: 'tether.timing'; v: 1; timing: Record<string, unknown>; mode?: NearbyWhileDirect; modeReason?: string };
 
 interface Socks {
   port: number;
@@ -108,7 +111,15 @@ export class Tether {
   private reshares = 0;
   private todoDone = new Set<string>();
   // ---- Direct が生きている間 Nearby を止める方式(cfg.nearbyWhileDirect === 'suspend') ----
-  private nearbyMode: 'keep' | 'suspend' = 'keep';
+  /** 実効方式(交換で確定するまで keep)。両端末で同じになる */
+  private nearbyMode: NearbyWhileDirect = 'keep';
+  /** 自分の希望(cfg.nearbyWhileDirect)と、Nearby 部品が suspend に対応しているか。実効方式の上限 */
+  private selfMode: NearbyWhileDirect = 'keep';
+  /** 親機: Direct を作り始めた(これ以降 suspend へは上げない) */
+  private modeLocked = false;
+  private modeWaitedOut = false;
+  private modeWaiters: (() => void)[] = [];
+  private modeInfo: LinkModeInfo = { self: 'keep', peer: null, effective: 'keep', reason: '相手の名乗り待ち(確定前は安全側)' };
   /** Nearby と Direct の使い分けの責任者。ネイティブ部品(this.nearby / this.hotspot)は必ずこれを通した薄いラッパー */
   private gov: LinkGovernor;
   private nearby: NearbyApi;
@@ -651,6 +662,9 @@ export class Tether {
     this.set({ share: 'starting', error: null });
     let again = false;
     try {
+      // Direct を作る前に、方式の交換(子機の hello)を待つ。来なければ keep のまま進む(確定前に Direct が張れたら keep)
+      await this.awaitModeDecision(gen);
+      if (gen !== this.gen) return;
       // 子機の能力と自分の能力から、方式と順序を決める(キャッシュがあれば待たない)
       const plan = await this.ensurePlan(gen);
       if (gen !== this.gen || !plan) return;
@@ -676,6 +690,20 @@ export class Tether {
     if (again) this.reshare();
   }
 
+  /** 親機: 子機の hello で実効方式が決まるまで(最長 capsWaitMs)待つ。待ち終えたあとに決まる suspend は採用しない(modeLocked) */
+  private async awaitModeDecision(gen: number): Promise<void> {
+    if (this.modeInfo.peer === null) {
+      await Promise.race([
+        new Promise<void>((r) => this.modeWaiters.push(r)),
+        this.p.sleep(this.cfg.capsWaitMs ?? 5000),
+      ]);
+      if (gen !== this.gen) return;
+      if (this.modeInfo.peer === null) this.modeWaitedOut = true;
+      if (this.modeInfo.peer === null) this.gnote('方式の交換: 子機の名乗りが来る前に進む → 実効=keep(安全側)');
+    }
+    this.modeLocked = true;
+  }
+
   /** 共有を作っている間に、より新しい判断(子機の能力を受信)で方式が変わったか */
   private needReshare(): boolean {
     const plan = this.state.plan;
@@ -695,7 +723,7 @@ export class Tether {
 
   /** 親機: 計画を得る。子機の能力が未取得なら、受信かタイムアウトまで待つ(待っても来なければ「不明」として決める) */
   private async ensurePlan(gen: number): Promise<LinkPlan | null> {
-    if (!this.guestCaps && !this.state.plan) {
+    if (!this.guestCaps && !this.state.plan && !this.modeWaitedOut) { // 子機が現れず方式の待ちで同じ時間を待ったあとは、もう待たない
       await Promise.race([
         new Promise<void>((r) => this.capsWaiters.push(r)),
         this.p.sleep(this.cfg.capsWaitMs ?? 5000),
@@ -755,7 +783,7 @@ export class Tether {
   private async sendHello(gen: number): Promise<void> {
     const caps = await this.capabilities();
     if (gen !== this.gen) return;
-    this.ctl?.send({ kind: 'tether.hello', v: PROTOCOL_VERSION, rev: capsRevision(caps) } satisfies Wire, { key: 'hello', ttlMs: 30_000 });
+    this.ctl?.send({ kind: 'tether.hello', v: PROTOCOL_VERSION, rev: capsRevision(caps), nwd: this.selfMode, tv: TIMING_WIRE_VERSION } satisfies Wire, { key: 'hello', ttlMs: 30_000 });
   }
 
   private async sendCaps(gen: number): Promise<void> {
@@ -764,8 +792,10 @@ export class Tether {
     this.ctl?.send({ kind: 'tether.caps', v: PROTOCOL_VERSION, rev: capsRevision(caps), caps } satisfies Wire, { key: 'caps', ttlMs: 30_000 });
   }
 
-  private async onHello(gen: number, peerId: string, v: unknown, rev: unknown): Promise<void> {
+  private async onHello(gen: number, peerId: string, v: unknown, rev: unknown, nwd?: unknown): Promise<void> {
     if (typeof v !== 'number') return;
+    // 方式の交換: 能力のやり取りより先に、実効方式を決めて子機へ返す(Direct を作る前に確定させるため)
+    this.hostDecideMode(asMode(nwd) ?? 'legacy');
     if (!isCompatibleVersion(v)) {
       // 版が合わない: 能力は読まず、版だけで「どちらを更新するか」を決めて通知する
       const stub = { ...(await this.capabilities()), v };
@@ -978,7 +1008,7 @@ export class Tether {
     // 親機: つながり直したら、判断と共有中の接続情報を再送する(Direct は作り直さず、子機は同じ SSID を再利用する)
     if (role === 'host') {
       this.sendPlan();
-      if (this.nearbyMode === 'suspend') this.ctl?.send({ kind: 'tether.timing', v: 1, timing: { ...pickShared(this.timing) } } satisfies Wire, { key: 'timing', ttlMs: WIFI_TTL_MS });
+      if (this.nearbyMode === 'suspend') this.sendTiming();
       if (this.shareMsg) {
         // suspend 方式: Direct のグループが消えていたら、接続情報を再送 → Nearby を閉じる → グループ再作成の順で作り直す。
         // グループが生きていれば維持して、接続情報を再送するだけ(子機は同じ SSID に入り直す)
@@ -1014,7 +1044,7 @@ export class Tether {
         else void this.join(gen, body, false);
         break;
       case 'tether.hello':
-        if (role === 'host') void this.onHello(gen, peerId, body.v, body.rev).catch((e) => this.log('hello 処理で例外: ' + (e?.message ?? e)));
+        if (role === 'host') void this.onHello(gen, peerId, body.v, body.rev, body.nwd).catch((e) => this.log('hello 処理で例外: ' + (e?.message ?? e)));
         break;
       case 'tether.caps-req':
         if (role === 'guest') void this.sendCaps(gen).catch(() => {});
@@ -1023,7 +1053,7 @@ export class Tether {
         if (role === 'host') void this.onCaps(gen, peerId, body.v, body.rev, body.caps).catch((e) => this.log('caps 処理で例外: ' + (e?.message ?? e)));
         break;
       case 'tether.timing':
-        if (role === 'guest') this.adoptHostTiming(gen, body.timing);
+        if (role === 'guest') this.adoptHostTiming(gen, body.timing, body.mode, body.modeReason);
         break;
       case 'tether.plan':
         if (role === 'guest') void this.onPlan(gen, body.plan).catch((e) => this.log('plan 処理で例外: ' + (e?.message ?? e)));
@@ -1196,7 +1226,7 @@ export class Tether {
   private linkContext(): LinkContext {
     const s = this.state;
     return {
-      role: s.role, started: s.started, nearbyMode: this.nearbyMode,
+      role: s.role, started: s.started, nearbyMode: this.nearbyMode, linkMode: { ...this.modeInfo },
       creating: s.role === 'host' && s.share === 'starting', joining: s.role === 'guest' && s.wifi === 'joining',
       directUp: s.role === 'host' ? s.share === 'on' && this.data.group !== false : s.wifi === 'joined',
       nearbyUp: s.link === 'connected', resumedBecause: this.resumedBecause, attempt: this.retry ? { n: this.retry.attempt, max: this.retry.max } : null,
@@ -1204,9 +1234,51 @@ export class Tether {
     };
   }
 
-  /** 子機: 親機が正の時間設定を受け取る（閾値の対応関係 親機の戻り ≤ 子機の探索開始 が崩れないよう、共有分は親機の値に揃える） */
-  private adoptHostTiming(gen: number, raw: Record<string, unknown>): void {
-    if (gen !== this.gen || this.state.role !== 'guest' || this.nearbyMode !== 'suspend') return;
+  /** 親機が正の時間設定と、決めた実効方式を子機へ配る(hello への返答。再接続でも送り直す) */
+  private sendTiming(): void {
+    this.ctl?.send({ kind: 'tether.timing', v: 1, timing: { ...pickShared(this.timing) }, mode: this.nearbyMode, modeReason: this.modeInfo.reason } satisfies Wire, { key: 'timing', ttlMs: WIFI_TTL_MS });
+  }
+
+  /** Direct を作り始めている/張れている(実効方式を suspend へ上げてはいけない) */
+  private directStarted(): boolean {
+    const s = this.state;
+    return s.role === 'host' ? this.modeLocked || s.share === 'on' : s.wifi === 'joined' || s.wifi === 'joining';
+  }
+
+  /**
+   * 実効方式を確定して DH-LINK に 1 行残す。
+   * 確定前(hello 前)は keep。suspend へ上げられるのは Direct を作る/参加する前だけ(Nearby が止まる間は交換できないため)。
+   * keep へ下げるのはいつでも安全なので許す。
+   */
+  private applyMode(peer: PeerMode, d: { effective: NearbyWhileDirect; reason: string }): void {
+    let { effective, reason } = d;
+    if (effective === 'suspend' && this.nearbyMode !== 'suspend' && this.directStarted()) {
+      effective = 'keep';
+      reason = 'Direct が方式の確定より先に張れていた(安全側)';
+    }
+    this.nearbyMode = effective;
+    this.modeInfo = { self: this.selfMode, peer, effective, reason };
+    this.gnote(describeLinkMode(this.modeInfo));
+    const ws = this.modeWaiters;
+    this.modeWaiters = [];
+    ws.forEach((r) => r());
+    this.set({});
+  }
+
+  /** 親機: 子機の hello の名乗りから実効方式を決め、子機へ返す。旧版(名乗りなし)は keep */
+  private hostDecideMode(peer: PeerMode): void {
+    if (this.state.role !== 'host') return;
+    this.applyMode(peer, decideLinkMode(this.selfMode, peer));
+    this.sendTiming();
+  }
+
+  /** 子機: 親機が決めた実効方式に従う。mode が無い(旧親機)ときは keep。共有の時間設定は suspend のときだけ採用する */
+  private adoptHostTiming(gen: number, raw: Record<string, unknown>, mode?: unknown, modeReason?: unknown): void {
+    if (gen !== this.gen || this.state.role !== 'guest') return;
+    const peer: PeerMode = asMode(mode) ?? 'legacy';
+    const d = decideLinkMode(this.selfMode, peer);
+    this.applyMode(peer, typeof modeReason === 'string' && peer !== 'legacy' ? { ...d, reason: d.reason + ' / 親機: ' + modeReason.slice(0, 80) } : d);
+    if (this.nearbyMode !== 'suspend') return;
     const shared = resolveTiming(raw as Partial<LinkTimingConfig>, { unchecked: this.cfg.timingUnchecked, log: (l) => this.gnote('timing(親機から): ' + l) });
     this.timing = { ...this.timing, ...pickShared(shared) };
     this.gov.setTiming(toGuardTiming(this.timing, 'guest'));
@@ -1218,7 +1290,7 @@ export class Tether {
   //
   // 判断の理由と状態遷移は src/link/directGuard.ts(純関数)。ここは信号を集めて、返ってきた動作(suspend / resume)を実行する。
 
-  /** 子機が keep と報告済み(親機だけ suspend)。子機は heartbeat(エコー)を送らず、親機は Nearby 作り直しもしない */
+  /** 子機が keep と報告済み(親機だけ suspend)。方式の交換が成立していれば起きない(子機が Direct 確立後に交換結果を受けた等の取りこぼし用の安全網)。子機は heartbeat(エコー)を送らず、親機は Nearby 作り直しもしない */
   private peerIsKeep(): boolean {
     return this.peerReported && !this.peerSuspends;
   }
@@ -1234,9 +1306,15 @@ export class Tether {
   }
 
   private setupDirectGuard(gen: number, role: TetherRole): void {
-    const want = this.cfg.nearbyWhileDirect === 'suspend';
+    const want = (this.cfg.nearbyWhileDirect ?? DEFAULT_NEARBY_WHILE_DIRECT) === 'suspend';
     const can = typeof this.nearby.suspend === 'function';
-    this.nearbyMode = want && can ? 'suspend' : 'keep';
+    // 自分の希望。実効方式は hello の交換で決まるまで keep(Direct が先に張れても安全側)
+    this.selfMode = want && can ? 'suspend' : 'keep';
+    this.nearbyMode = 'keep';
+    this.modeLocked = false;
+    this.modeWaitedOut = false;
+    this.modeWaiters = [];
+    this.modeInfo = { self: this.selfMode, peer: null, effective: 'keep', reason: '相手の名乗り待ち(確定前は安全側)' };
     if (want && !can) this.log('nearbyWhileDirect=suspend ですが、この Nearby 部品は suspend 未対応のため keep で動きます');
     this.gov.setTiming(toGuardTiming(this.timing, role));
     this.gov.setStrict(this.cfg.strictLinkGuard);
@@ -1244,13 +1322,13 @@ export class Tether {
     this.data = initialDataPath();
     this.peerSuspends = false;
     this.peerReported = false;
-    this.log(`Nearby と Direct: ${this.nearbyMode}${this.nearbyMode === 'suspend' ? ' ' + JSON.stringify(this.gov.timing) : ''}`);
+    this.log(`Nearby と Direct: 希望=${this.selfMode}(実効は hello の交換で決まる。確定まで keep) ${JSON.stringify(this.gov.timing)}`);
     // データ経路の観測は keep でも行う(総合状態 overall に使う)。切れたときの動作だけが suspend 方式
     if (role === 'host') {
       this.offGroup = this.hotspot.onDirectGroup?.((e) => this.onDirectGroup(gen, e)) ?? null;
       this.offEcho = this.hotspot.onEchoAccept?.(() => this.onEchoAccept(gen)) ?? null;
     }
-    if (this.nearbyMode !== 'suspend') return;
+    if (this.selfMode !== 'suspend') return; // 実効が suspend になりうるときだけ判定ループを回す(各 tick で実効方式を見る)
     void this.guardLoop(gen);
     if (role === 'guest') void this.heartbeatLoop(gen);
   }
@@ -1380,7 +1458,7 @@ export class Tether {
     while (gen === this.gen) {
       await this.p.sleep(hb);
       if (gen !== this.gen) return;
-      if (this.state.wifi !== 'joined' || !this.gateway) { lastAt = this.p.now(); continue; }
+      if (this.nearbyMode !== 'suspend' || this.state.wifi !== 'joined' || !this.gateway) { lastAt = this.p.now(); continue; }
       if (this.hbNative) { lastAt = this.p.now(); continue; } // ネイティブが送っている間は JS からは送らない
       const gap = this.p.now() - lastAt > hb * 2.5;
       let res = await this.hotspot.probe(this.gateway, this.lastPort);
@@ -1666,6 +1744,8 @@ const sameWifi = (a: WifiMsg, b: WifiMsg) =>
   a.ssid === b.ssid && a.pass === b.pass && a.port === b.port && a.socks.user === b.socks.user && a.socks.pass === b.socks.pass && a.socks.port === b.socks.port;
 
 const DEVICE_ROLE_KEY = 'tether.deviceRole';
+/** hello の tv: 共有 timing(tether.timing)の版 */
+const TIMING_WIRE_VERSION = 1;
 const TIMING_KEY = 'tether.timing.v1';
 
 const safeFreq = (h: { wifiFrequency(): number }): number => {

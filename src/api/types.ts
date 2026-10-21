@@ -205,6 +205,10 @@ export interface TetherConfig {
    */
   /** true: Nearby/Direct の不変条件(src/link/linkGovernor.ts)に違反したら例外を投げる(テスト用)。既定 false=拒否して DH-LINK にログ */
   strictLinkGuard?: boolean;
+  /**
+   * Direct 稼働中の Nearby の扱い。既定は DEFAULT_NEARBY_WHILE_DIRECT(src/link/linkMode.ts)。
+   * これは**自分の希望**で、実効の方式は接続の最初の hello で相手と交換して決まる(両方 suspend のときだけ suspend。linkSnapshot().mode)。
+   */
   nearbyWhileDirect?: 'keep' | 'suspend';
   /** 子機のハートビートを画面オフ中だけ延ばす間隔(ms)。省略=延ばさない。T_echo の半分を超えない範囲に丸める */
   hbScreenOffIntervalMs?: number;

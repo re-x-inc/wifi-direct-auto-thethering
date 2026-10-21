@@ -168,12 +168,12 @@ test('Direct が続けて失敗した履歴があると、次回は LocalOnlyHot
   const { hostT, host } = await setup({ directFails: true });
   for (let i = 0; i < 2; i++) {
     await hostT.start();
-    await until(() => hostT.getState().share === 'on');
+    await until(() => hostT.getState().share === 'on', 6000);
     hostT.stop();
   }
   const before = host.calls.filter((c) => c === 'startDirect').length;
   await hostT.start();
-  await until(() => hostT.getState().share === 'on');
+  await until(() => hostT.getState().share === 'on', 6000);
   assert.equal(hostT.getState().plan?.order[0], 'LocalOnlyHotspot');
   assert.equal(host.calls.filter((c) => c === 'startDirect').length, before); // Direct を試さずに済んだ
   hostT.stop();
