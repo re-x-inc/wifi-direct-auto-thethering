@@ -70,11 +70,12 @@ comparisonMarkdown([reportA, reportB], /* onlyDiffs */ true); // 機種比較の
 - `TetherConfig.hbScreenOffIntervalMs`(省略=延ばさない)/ `hbWakeLock`(既定 true): 子機のハートビートはネイティブ(Hotspot モジュールの専用スレッド)で続き、JS が止まっても送る。画面オフ中だけ間隔を延ばす値(T_echo の半分まで)と、動作中 PARTIAL_WAKE_LOCK を持つかの指定。ネイティブ側が無い部品では従来の JS ループで動く。ログのタグ: `DH-HB`(logcat)、`[DH-LINK] ネイティブのハートビート…`。
 - `TetherState.data`: `{ group, echoAt, heartbeat, okAt, reach, busAt, aliveAt, bus }`(`aliveAt` = 最後に Direct の生存を確認した時刻(LinkGovernor が保持。Echo・バス・ZMTP heartbeat のどれから来ても同じ)/ `bus` = `'authenticated' | 'disconnected' | 'off'`。親機: グループの有無・子機のエコー最終受付 / 子機: Wi-Fi 参加・ハートビート・到達確認)。
 - 既存の購読者への影響なし(フィールド追加のみ)。`link` は Nearby の状態のまま(suspend 中は `'waiting'`)なので、接続表示には `overall` を使う。
-- `send()` は Direct 稼働中は溜まる(`pending`)。Nearby 再開後に届く。Direct 上の制御バスは別 PR(`src/link/transport.ts` の `ControlTransport` に差す)。
 
 ## Direct 稼働中のメッセージ(バス)
 
-`tether.send()` / `onMessage()` は、Direct 稼働中(Nearby を止めている間)は Direct 上のバスで、それ以外は Nearby で運ばれる。呼び出し側の API は変わらない。切断中は溜めて再接続後に送信順で再送(ttl・key も同じ意味)。受け手には at-least-once のうち重複を除いて 1 回だけ渡る。詳細は [GATEWAY_BUS.md](GATEWAY_BUS.md) §11 / [LINK_STATE.md](LINK_STATE.md)。
+`tether.send()` / `onMessage()`(アプリのメッセージ: 受諾・地図を開く・待機場所・履歴など)は、**運び先が常に Direct 上のバスだけ**。Nearby には載せない(送るのも、Nearby から届いたアプリのメッセージを受けるのも)。バスが使えない間(Direct 未確立・未認証・切断中)は **バスの保留キューに溜め**、再接続後に送信順で再送する。`ttlMs` を過ぎたものは捨てる(`ttlMs` 未指定=無期限・`0`=溜めない・`key`=同じ key の未確認を置き換え。既存の既定値は変えていない)。保留はアプリのメッセージ 200 件まで(超えたら古いものから捨てる)。Nearby が運んでよいのは tether 内部の制御(`tether.wifi` / `hello` / `caps` / `timing` / `plan` / `need-wifi` など)だけ。受け手には at-least-once のうち重複を除いて 1 回だけ渡る。バス部品が無い端末ではアプリのメッセージは届かない(溜まって ttl で捨てられる)。旧 tether との互換は無い(全端末を同時に更新する前提)。
+
+`linkSnapshot()` / `onLink()` に運び先の表示用フィールドを足した(既存フィールドは変更なし): `controlCarrier`(内部制御のいまの運び先 `'nearby' | 'bus'`)、`appCarrier`(アプリのメッセージの運び先。常に `'bus'`)、`appPending`(バスに溜まって未送達のアプリのメッセージ数)。診断ログ(`[DH-LINK]`、中身は出さず種別と運び先のみ): `送信[アプリ] 種別=<kind> → バス | 溜め(理由) | 破棄(ttl/上限)`、`受信[アプリ] 種別=<kind> ← バス`、`送信[制御] 種別=<kind> → Nearby | バス`。種別 `<kind>` はアプリの body の `kind`(無ければ `type`、どちらも無ければ型名)。詳細は [GATEWAY_BUS.md](GATEWAY_BUS.md) §11 / [LINK_STATE.md](LINK_STATE.md)。
 
 ## 生存確認(ZMTP heartbeat)と再接続 API
 - `tether.linkSnapshot()`(`onLink`)に **`path.lastAliveAt`**(最後に生存を確認した時刻 epoch ms / 無ければ null)・**`path.bus`**(`authenticated` / `disconnected` / `off`)・`data`(`TetherState.data` と同じ)を追加(追加のみ。mobile は feature-detect で読む)。`TetherState.data.aliveAt` / `.bus` も同じ値。

@@ -1,5 +1,6 @@
 import type { ControlTransport } from './transport';
 import type { Frame, SendOptions } from './supervisor';
+import { Channel, channelOf, kindOf } from './channel';
 
 /**
  * Direct 上のバスのネイティブ部品(Kotlin の BusEngine。ZeroMQ = jeromq)の JS 側の窓口。
@@ -52,7 +53,18 @@ export interface BusPort {
   onMessage(cb: (payload: string) => void): () => void;
 }
 
+/** バスが何も無い端末(部品なし)用。常に「送れない」ので、送ったものは溜まって ttl で捨てられるだけ */
+export const NO_BUS_PORT: BusPort = {
+  start: () => '', stop: () => {}, send: () => false,
+  status: () => ({ running: false, up: false, lastRxAt: 0, connects: 0, lastError: null }),
+  onState: () => () => {}, onMessage: () => () => {},
+};
+
 interface Pending {
+  channel: Channel;
+  kind: string;
+  /** 一度でもバスに書いたか(溜めたまま捨てるときだけログに出す) */
+  written: boolean;
   frame: Frame;
   expiresAt: number;
   key?: string;
@@ -63,6 +75,20 @@ export interface BusControlOptions {
   now: () => number;
   /** 重複排除の記憶数 */
   seenMax?: number;
+  /** アプリのメッセージを溜める最大数(超えたら古いものから捨てる)。既定 200 */
+  appMax?: number;
+  /** 溜めた分の送信(flush)・溜めたまま捨てたもの(ttl / 上限)の通知。中身は渡さない */
+  onEvent?: (e: BusEvent) => void;
+}
+
+export type BusEvent =
+  | { ev: 'flush'; channel: Channel; kind: string }
+  | { ev: 'drop'; channel: Channel; kind: string; reason: 'ttl' | 'limit' };
+
+export interface BusSendResult {
+  /** sent = バスに書いた / queued = 未接続なので溜めた / dropped = 溜められず捨てた */
+  outcome: 'sent' | 'queued' | 'dropped';
+  reason?: 'ttl0' | 'limit';
 }
 
 /**
@@ -116,13 +142,50 @@ export class BusControl implements ControlTransport {
     if (changed || up) for (const cb of [...this.upSubs]) { try { cb(up, reason); } catch {} }
   }
 
-  send(body: unknown, opts: SendOptions = {}): void {
+  send(body: unknown, opts: SendOptions = {}): BusSendResult {
     const frame: Frame = { type: 'data', seq: ++this.seq, epoch: this.epoch, body };
-    if (opts.ttlMs !== 0) {
-      if (opts.key !== undefined) for (const [s, p] of this.unacked) if (p.key === opts.key) this.unacked.delete(s);
-      this.unacked.set(frame.seq, { frame, expiresAt: opts.ttlMs === undefined ? Infinity : this.o.now() + opts.ttlMs, key: opts.key, ttlMs: opts.ttlMs });
+    const channel = channelOf(body);
+    const kind = kindOf(body);
+    if (opts.ttlMs === 0) {
+      // 溜めない: 接続中なら送る。未接続なら捨てる(Nearby には回さない)
+      if (!this.up) return { outcome: 'dropped', reason: 'ttl0' };
+      this.write(frame);
+      return { outcome: 'sent' };
     }
-    if (this.up) this.write(frame);
+    if (opts.key !== undefined) for (const [s, p] of this.unacked) if (p.key === opts.key) this.unacked.delete(s);
+    const entry: Pending = { channel, kind, written: false, frame, expiresAt: opts.ttlMs === undefined ? Infinity : this.o.now() + opts.ttlMs, key: opts.key, ttlMs: opts.ttlMs };
+    this.unacked.set(frame.seq, entry);
+    if (channel === 'app') this.limitApp();
+    if (this.up) { entry.written = true; this.write(frame); return { outcome: 'sent' }; }
+    return { outcome: 'queued' };
+  }
+
+  /** アプリの保留が上限を超えたら古いものから捨てる */
+  private limitApp(): void {
+    const max = this.o.appMax ?? 200;
+    const apps = [...this.unacked.entries()].filter(([, p]) => p.channel === 'app');
+    for (let i = 0; i < apps.length - max; i++) {
+      const [s, p] = apps[i];
+      this.unacked.delete(s);
+      if (!p.written) this.emit({ ev: 'drop', channel: p.channel, kind: p.kind, reason: 'limit' });
+    }
+  }
+
+  private emit(e: BusEvent): void {
+    try { this.o.onEvent?.(e); } catch {}
+  }
+
+  /** 期限切れの掃除(Tether の tick から呼ぶ。溜めたまま期限が来たものはここでログに出る) */
+  sweep(): void {
+    this.purge();
+  }
+
+  /** 保留のうち、指定チャネルの数(未送信・未確認の合計) */
+  pendingOf(channel: Channel): number {
+    this.purge();
+    let n = 0;
+    for (const p of this.unacked.values()) if (p.channel === channel) n++;
+    return n;
   }
 
   subscribe(cb: (body: unknown) => void): () => void {
@@ -140,29 +203,41 @@ export class BusControl implements ControlTransport {
   }
 
   /**
-   * 未確認の分を取り出して空にする(Nearby へ縮退するとき、Nearby の送信へ移すため)。送信順。残り ttl つき。
+   * 未確認の**内部制御**を取り出す(Nearby へ縮退するとき、Nearby の送信へ移すため)。送信順。残り ttl つき。
+   * アプリのメッセージ('app')は Nearby に載せないので、ここでは取り出さず、バスの保留に残す。
    * 相手が受け取っていて ack だけ失われたものは、移した先で二重に届きうる(受け手のアプリは冪等に扱う)。
    */
   takePending(): { body: unknown; opts: SendOptions }[] {
     this.purge();
     const now = this.o.now();
-    const out = [...this.unacked.values()].map((p) => ({
-      body: (p.frame as { body: unknown }).body,
-      opts: { key: p.key, ttlMs: p.expiresAt === Infinity ? undefined : Math.max(1, p.expiresAt - now) } as SendOptions,
-    }));
-    this.unacked.clear();
+    const out: { body: unknown; opts: SendOptions }[] = [];
+    for (const [s, p] of [...this.unacked]) {
+      if (p.channel !== 'ctl') continue;
+      out.push({
+        body: (p.frame as { body: unknown }).body,
+        opts: { key: p.key, ttlMs: p.expiresAt === Infinity ? undefined : Math.max(1, p.expiresAt - now) } as SendOptions,
+      });
+      this.unacked.delete(s);
+    }
     return out;
   }
 
   private purge(): void {
     const now = this.o.now();
-    for (const [s, p] of this.unacked) if (p.expiresAt <= now) this.unacked.delete(s);
+    for (const [s, p] of this.unacked) {
+      if (p.expiresAt > now) continue;
+      this.unacked.delete(s);
+      if (!p.written) this.emit({ ev: 'drop', channel: p.channel, kind: p.kind, reason: 'ttl' });
+    }
   }
 
   /** 再接続・認証完了のあと、未確認を送信順に再送する */
   private flush(): void {
     this.purge();
-    for (const p of this.unacked.values()) this.write(p.frame);
+    for (const p of this.unacked.values()) {
+      this.write(p.frame);
+      if (!p.written) { p.written = true; this.emit({ ev: 'flush', channel: p.channel, kind: p.kind }); }
+    }
   }
 
   private write(f: Frame): void {

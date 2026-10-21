@@ -10,7 +10,7 @@ type Handler = (e: any) => void;
  */
 export function fakeNearbyPair() {
   type Side = NearbyApi & {
-    name: string; directActive: boolean[]; suspended: boolean; leaked: string[]; suspendCount: number; notes: string[]; advertising: boolean; discovering: boolean; endpoint: string | null;
+    name: string; directActive: boolean[]; suspended: boolean; leaked: string[]; /** Nearby で実際に送った文字列(接続中のものだけ) */ sentTexts: string[]; suspendCount: number; notes: string[]; advertising: boolean; discovering: boolean; endpoint: string | null;
     emit(ev: string, e: any): void; label: string;
   };
   let connected = false;
@@ -19,7 +19,7 @@ export function fakeNearbyPair() {
   const make = (name: string, label: 'H' | 'G'): Side => {
     const h = new Map<string, Set<Handler>>();
     const side: Side = {
-      name, label, directActive: [], suspended: false, leaked: [], suspendCount: 0, notes: [], advertising: false, discovering: false, endpoint: null,
+      name, label, directActive: [], suspended: false, leaked: [], sentTexts: [], suspendCount: 0, notes: [], advertising: false, discovering: false, endpoint: null,
       emit: (ev, e) => h.get(ev)?.forEach((cb) => cb(e)),
       setDirectActive(on: boolean) { side.directActive.push(on); },
       async suspend() { side.suspended = true; side.suspendCount++; side.advertising = false; side.discovering = false; if (connected) drop(); },
@@ -42,6 +42,7 @@ export function fakeNearbyPair() {
       accept() {}, reject() {},
       send(_id, text) {
         if (!connected || blackhole) return;
+        side.sentTexts.push(text);
         const to = side === host ? guest : host;
         queueMicrotask(() => connected && to.emit('onMessage', { endpointId: side === host ? 'H' : 'G', text }));
       },

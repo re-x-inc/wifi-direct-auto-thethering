@@ -62,32 +62,27 @@ test('Direct が張れている間だけ Nearby に directActive=true を知ら�
   assert.deepEqual(nearby.guest.directActive.slice(-1), [false]);
 });
 
-test('アプリのメッセージは相手に届き、内部メッセージは混ざらない', async () => {
-  const { hostT, guestT } = await setup();
-  const got: unknown[] = [];
-  guestT.onMessage((b, meta) => got.push([b, meta.role]));
-  await hostT.start(); await guestT.start();
-  await until(() => guestT.getState().vpn === 'on');
-  hostT.send({ kind: 'accept', id: 'o1' });
-  await until(() => got.length === 1);
-  assert.deepEqual(got, [[{ kind: 'accept', id: 'o1' }, 'guest']]);
-  hostT.stop(); guestT.stop();
-});
-
-test('ttl: 切断中に溜める(受諾)/ 溜めない(ttl 0)/ key で置き換え', async () => {
+test('バス部品が無い端末: アプリのメッセージは Nearby に載らず、溜まるだけ(ttl で捨てる)', async () => {
   const { hostT, guestT, net } = await setup();
-  const got: any[] = [];
+  const got: unknown[] = [];
   guestT.onMessage((b) => got.push(b));
+  const logs: string[] = [];
+  hostT.onLog((l) => logs.push(l));
   await hostT.start(); await guestT.start();
   await until(() => net.connected);
-  net.drop();
-  hostT.send({ n: 'status-1' }, { ttlMs: 0 });
-  hostT.send({ n: 'accept' }, { ttlMs: 10 * 60 * 1000 });
-  hostT.send({ n: 'pos-1' }, { key: 'pos' });
-  hostT.send({ n: 'pos-2' }, { key: 'pos' });
-  await until(() => got.length >= 2, 3000);
-  await wait(50);
-  assert.deepEqual(got.map((b) => b.n), ['accept', 'pos-2']);
+  assert.equal(hostT.send({ kind: 'accept', id: 'o1' }), true);
+  hostT.send({ n: 'short' }, { ttlMs: 20 });
+  hostT.send({ n: 'nowait' }, { ttlMs: 0 });
+  await wait(300);
+  assert.deepEqual(got, []);
+  // Nearby に tether.app は一度も出ていない
+  assert.deepEqual([...net.host.sentTexts, ...net.guest.sentTexts].filter((t) => t.includes('tether.app')), []);
+  assert.ok(logs.some((l) => l.includes('送信[アプリ] 種別=accept → 溜め(')));
+  assert.ok(logs.some((l) => l.includes('→ 破棄(ttl=0 でバス未接続)')));
+  assert.ok(logs.some((l) => l.includes('→ 破棄(ttl)')), 'ttl 切れは tick で捨てて記録');
+  assert.equal(hostT.linkSnapshot().appCarrier, 'bus');
+  assert.equal(hostT.linkSnapshot().controlCarrier, 'nearby');
+  assert.equal(hostT.linkSnapshot().appPending, 1); // accept(ttl なし)だけ残る
   hostT.stop(); guestT.stop();
 });
 
