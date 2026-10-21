@@ -24,6 +24,7 @@ import {
   HandshakeEvent,
   HotspotPort,
   MessageMeta,
+  NativeHeartbeatStatus,
   SendOptions,
   StartOptions,
   TetherConfig,
@@ -132,6 +133,10 @@ export class Tether {
   private lastPort = ECHO_PORT;
   private offGroup: (() => void) | null = null;
   private offEcho: (() => void) | null = null;
+  /** 子機: ネイティブのハートビートが動いている(接続先)。null = 動いていない(JS の heartbeatLoop が代わりに動く) */
+  private hbNative: { host: string; port: number } | null = null;
+  private offHb: (() => void) | null = null;
+  private hbFailNoted = 0;
   private overallSubs = new Set<(o: Overall, prev: Overall) => void>();
 
   constructor(private p: TetherPlatform, private cfg: TetherConfig = {}) {
@@ -568,6 +573,7 @@ export class Tether {
     this.nearbyDirectActive(false);
     this.offGroup?.(); this.offGroup = null;
     this.offEcho?.(); this.offEcho = null;
+    this.stopNativeHb('stop');
     this.suspendSeq++;
     if (this.nearbySuspended) { this.nearbySuspended = false; try { this.nearby.resume?.(); } catch {} }
     this.gov.reset();
@@ -1274,9 +1280,15 @@ export class Tether {
       if (gen !== this.gen) return;
       const t = this.p.now();
       // JS が止まっていた(画面オフ・Doze)あとの最初の tick は、無通信を数え直す(止まっていた間は相手の通信も遅れたとみなす)
+      // ネイティブのハートビートが動いていれば、まずその最新の結果を読む。止まっていた時間は「失敗」ではなく、
+      // ネイティブが記録した最後の成功時刻で判定する(ネイティブ自身も止まっていた場合だけ、従来どおり数え直す)
+      const nativeFresh = this.syncNativeHb(gen);
       if (t - last > Math.max(tickMs * 5, 3_000)) {
-        this.gnote(`判定が ${t - last}ms 止まっていた(Doze など): 無通信の数え直し`);
-        this.gov.grace();
+        if (nativeFresh) this.gnote(`判定が ${t - last}ms 止まっていた(Doze など): ネイティブのハートビート結果で判定(数え直さない)`);
+        else {
+          this.gnote(`判定が ${t - last}ms 止まっていた(Doze など): 無通信の数え直し`);
+          this.gov.grace();
+        }
       }
       last = t;
       this.guard(gen, { t: 'tick' });
@@ -1284,6 +1296,73 @@ export class Tether {
       this.deriveState();
       if (this.state.overall !== before) this.set({});
     }
+  }
+
+  /**
+   * 子機: ネイティブのハートビートを、あるべき状態(suspend 方式・Wi-Fi 参加中・親機の IP が分かっている)に合わせて開始/停止/結果の取り込みをする。
+   * 戻り値 = ネイティブの結果が新鮮(ネイティブ自身が止まっていない)なら true。使えない部品・起動失敗は false(JS の heartbeatLoop が動く)。
+   */
+  private syncNativeHb(gen: number): boolean {
+    const h = this.hotspot;
+    if (typeof h.heartbeatStart !== 'function' || typeof h.heartbeatStatus !== 'function') return false;
+    const want = this.state.role === 'guest' && this.nearbyMode === 'suspend' && this.state.wifi === 'joined' && !!this.gateway;
+    if (!want) { this.stopNativeHb('不要になった(Wi-Fi 未参加・停止)'); return false; }
+    const host = this.gateway as string;
+    const port = this.lastPort;
+    if (!this.hbNative || this.hbNative.host !== host || this.hbNative.port !== port) {
+      this.stopNativeHb('接続先が変わった');
+      const hb = this.hbMs();
+      let off = this.cfg.hbScreenOffIntervalMs;
+      if (off !== undefined) off = Math.max(hb, Math.min(off, Math.floor(this.gov.timing.echoMs / 2)));
+      try {
+        h.heartbeatStart({ host, port, intervalMs: hb, timeoutMs: Math.min(3_000, hb), screenOffIntervalMs: off, wakeLock: this.cfg.hbWakeLock ?? true });
+      } catch (e: any) {
+        this.gnote(`ネイティブのハートビート起動失敗(JS で代替): ${e?.message ?? e}`);
+        return false;
+      }
+      this.hbNative = { host, port };
+      this.hbFailNoted = 0;
+      this.offHb = h.onHeartbeat?.((st) => { if (gen === this.gen) this.applyNativeHb(gen, st); }) ?? null;
+      this.gnote(`ネイティブのハートビート開始 ${hb}ms${off ? ` (画面オフ中 ${off}ms)` : ''}: JS が止まっても親機のエコーへ送り続ける`);
+    }
+    let st: NativeHeartbeatStatus;
+    try { st = h.heartbeatStatus(); } catch { return false; }
+    if (!st.running) { this.stopNativeHb('ネイティブが停止していた'); return false; }
+    this.applyNativeHb(gen, st);
+    // ネイティブ自身が長く試行していない(CPU が眠っていた等)ときは、結果を新鮮とみなさない
+    const ref = st.lastAttemptAt || 0;
+    return ref > 0 && this.p.now() - ref <= this.hbMs() * 2.5 + 3_000;
+  }
+
+  private stopNativeHb(why: string): void {
+    this.offHb?.(); this.offHb = null;
+    if (!this.hbNative) return;
+    this.hbNative = null;
+    try { this.hotspot.heartbeatStop?.(); } catch {}
+    this.gnote(`ネイティブのハートビート停止(${why})`);
+  }
+
+  /** ネイティブの結果(最後の成功/失敗の時刻)を取り込む。時刻は結果が出た時刻そのもの=JS が止まっていた間も正しい */
+  private applyNativeHb(gen: number, st: NativeHeartbeatStatus): void {
+    if (gen !== this.gen || !this.hbNative) return;
+    let changed = false;
+    if (st.lastOkAt > (this.data.okAt ?? 0)) {
+      this.data = { ...this.data, heartbeat: { ok: true, at: st.lastOkAt }, okAt: st.lastOkAt };
+      this.guard(gen, { t: 'alive' });
+      this.gov.setAliveAt(st.lastOkAt);
+      if (this.gov.phase === 'nearby' && this.state.vpn === 'on' && !this.joining) this.guard(gen, { t: 'ready' });
+      changed = true;
+    }
+    if (st.consecutiveFailures > 0 && st.lastFailAt > (this.data.heartbeat?.at ?? 0) && st.lastFailAt >= st.lastOkAt) {
+      this.data = { ...this.data, heartbeat: { ok: false, at: st.lastFailAt } };
+      if (st.consecutiveFailures !== this.hbFailNoted) {
+        this.hbFailNoted = st.consecutiveFailures;
+        this.gnote(`ハートビート失敗(ネイティブ): ${st.lastError ?? '?'} 連続 ${st.consecutiveFailures} 回(最後の成功から ${st.lastOkAt ? st.lastFailAt - st.lastOkAt : '?'}ms。T_echo=${this.gov.timing.echoMs}ms で異常とみなす)`);
+      }
+      changed = true;
+    }
+    if (st.consecutiveFailures === 0) this.hbFailNoted = 0;
+    if (changed) this.set({});
   }
 
   /** 子機: Direct 上のエコー(親機の 9000)へ定期的に接続して生存を確かめる。親機側はこの接続の有無で子機の生存を見る */
@@ -1294,6 +1373,7 @@ export class Tether {
       await this.p.sleep(hb);
       if (gen !== this.gen) return;
       if (this.state.wifi !== 'joined' || !this.gateway) { lastAt = this.p.now(); continue; }
+      if (this.hbNative) { lastAt = this.p.now(); continue; } // ネイティブが送っている間は JS からは送らない
       const gap = this.p.now() - lastAt > hb * 2.5;
       let res = await this.hotspot.probe(this.gateway, this.lastPort);
       // 長く眠っていた直後の 1 回目の失敗は、回線が起き切っていないだけのことが多い: 数えずに 1 回やり直す

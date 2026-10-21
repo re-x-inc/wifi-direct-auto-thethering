@@ -132,6 +132,11 @@ export class LinkGovernor {
     if (this.s.phase === 'direct') this.s = { ...this.s, aliveAt: this.o.now() };
   }
 
+  /** ネイティブのハートビートが最後に成功した時刻(JS の now 以前)へ、生存確認の基準を合わせる。JS が止まっていた間の時間を無通信に数えない */
+  setAliveAt(at: number): void {
+    if (this.s.phase === 'direct') this.s = { ...this.s, aliveAt: Math.min(at, this.o.now()) };
+  }
+
   /** suspend が完了した / 再開した(Tether が実際の Nearby 操作を終えたら知らせる) */
   markNearbyStopped(stopped: boolean): void {
     this.nearbyStopped = stopped;

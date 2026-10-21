@@ -53,6 +53,7 @@ class HotspotModule : Module() {
   private var joinedSsid: String? = null
   private var joinedGw: String? = null
   private var echo: ServerSocket? = null
+  private val heartbeat = Heartbeat({ joined }) { st -> sendEvent("onHeartbeat", st) }
   private var socks: SocksServer? = null
   private var socksRef: SocksServer? = null
   private var cellular: Network? = null
@@ -77,9 +78,9 @@ class HotspotModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("Hotspot")
-    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "onDirectGroup", "onEchoAccept", "log")
+    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "onDirectGroup", "onEchoAccept", "onHeartbeat", "log")
     OnCreate { DhLog.sink = { tag, line -> sendEvent("log", mapOf("tag" to tag, "line" to line)) } }
-    OnDestroy { DhLog.sink = null }
+    OnDestroy { heartbeat.stop("module destroy"); DhLog.sink = null }
 
     // ---- 親機 ----
     AsyncFunction("startHotspot") { promise: Promise ->
@@ -396,6 +397,16 @@ class HotspotModule : Module() {
       n != null
     }
     Function("unbindProcess") { cm.bindProcessToNetwork(null) }
+
+    /**
+     * 子機のハートビートをネイティブで続ける(JS が止まっても動く)。接続先は親機の GO の IP とエコーのポート。
+     * 参加した Wi-Fi(joined)の socketFactory で接続する(probe と同じ経路)。結果は heartbeatStatus で読み、onHeartbeat でも届く。
+     */
+    Function("heartbeatStart") { host: String, port: Int, intervalMs: Double, timeoutMs: Double, screenOffIntervalMs: Double, wakeLock: Boolean ->
+      heartbeat.start(ctx, host, port, intervalMs.toLong(), timeoutMs.toLong(), screenOffIntervalMs.toLong(), wakeLock)
+    }
+    Function("heartbeatStop") { heartbeat.stop("JS") }
+    Function("heartbeatStatus") { heartbeat.status() }
 
     /** 参加した Wi-Fi 経由で host:port へ TCP 接続し、"ping" を送って往復時間(ms)を返す。 */
     AsyncFunction("probe") { host: String, port: Int, promise: Promise ->

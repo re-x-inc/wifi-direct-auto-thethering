@@ -38,6 +38,13 @@ export function nativePlatform(): TetherPlatform {
       bindToJoined: () => Hotspot.bindToJoined(),
       unbindProcess: () => Hotspot.unbindProcess(),
       probe: (h, port) => Hotspot.probe(h, port),
+      heartbeatStart: (o) => Hotspot.heartbeatStart(o.host, o.port, o.intervalMs, o.timeoutMs, o.screenOffIntervalMs ?? 0, o.wakeLock ?? true),
+      heartbeatStop: () => Hotspot.heartbeatStop(),
+      heartbeatStatus: () => Hotspot.heartbeatStatus(),
+      onHeartbeat: (cb) => {
+        const sub = Hotspot.addListener('onHeartbeat', (e) => cb(e));
+        return () => sub.remove();
+      },
       onWifiLost: (cb) => {
         const sub = Hotspot.addListener('onWifiLost', () => cb());
         return () => sub.remove();

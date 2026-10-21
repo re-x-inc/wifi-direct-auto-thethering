@@ -67,6 +67,7 @@ comparisonMarkdown([reportA, reportB], /* onlyDiffs */ true); // 機種比較の
 - `TetherConfig.nearbyWhileDirect: 'keep' | 'suspend'`(既定 `'keep'`)。`'suspend'` は Direct が張れている間 Nearby の広告・探索・接続を止め、Direct が切れたときだけ再開する。両端末で同じ値にする。`directGuard`(echoMs / directMs / nearbyMs / hbIntervalMs / tickMs)・`directRetry`(attempts / backoffMs / joinTimeoutMs / attemptMs)で時間を変えられる。
 - `TetherState.nearby`: `'up' | 'down' | 'suspended'`(`suspended` は意図した停止で異常ではない)。
 - `TetherState.overall`: `'connected' | 'degraded' | 'disconnected'`。**データ経路だけ**から導く(Nearby の link には依存しない)。`Tether.onOverall(cb)` で変化を購読できる。
+- `TetherConfig.hbScreenOffIntervalMs`(省略=延ばさない)/ `hbWakeLock`(既定 true): 子機のハートビートはネイティブ(Hotspot モジュールの専用スレッド)で続き、JS が止まっても送る。画面オフ中だけ間隔を延ばす値(T_echo の半分まで)と、動作中 PARTIAL_WAKE_LOCK を持つかの指定。ネイティブ側が無い部品では従来の JS ループで動く。ログのタグ: `DH-HB`(logcat)、`[DH-LINK] ネイティブのハートビート…`。
 - `TetherState.data`: `{ group, echoAt, heartbeat, okAt, reach }`(親機: グループの有無・子機のエコー最終受付 / 子機: Wi-Fi 参加・ハートビート・到達確認)。
 - 既存の購読者への影響なし(フィールド追加のみ)。`link` は Nearby の状態のまま(suspend 中は `'waiting'`)なので、接続表示には `overall` を使う。
 - `send()` は Direct 稼働中は溜まる(`pending`)。Nearby 再開後に届く。Direct 上の制御バスは別 PR(`src/link/transport.ts` の `ControlTransport` に差す)。
