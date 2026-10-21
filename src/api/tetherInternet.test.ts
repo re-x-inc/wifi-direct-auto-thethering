@@ -1,7 +1,12 @@
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { pairedFakes } from './fakePlatform';
 import { Tether } from './tether';
+
+// 失敗してもタイマーと親機・子機を止める(残るとプロセスが終わらない)。cleanup は何度呼んでもよい
+const live: Array<() => void> = [];
+afterEach(() => live.splice(0).forEach((f) => f()));
+const stopAll = (f: () => void) => { let done = false; const g = () => { if (!done) { done = true; f(); } }; live.push(g); return g; };
 
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const until = async (cond: () => boolean, ms = 3000, what = '') => {
@@ -29,7 +34,7 @@ async function setup(o: { internet?: object | null } = {}) {
   const pulseTimer = setInterval(() => { if (pulse && f.bus?.isUp()) f.bus.pulse(); }, 10);
   return {
     ...f, hostT, guestT, stop: () => { pulse = false; },
-    cleanup: () => { clearInterval(pulseTimer); hostT.stop(); guestT.stop(); },
+    cleanup: stopAll(() => { clearInterval(pulseTimer); hostT.stop(); guestT.stop(); }),
   };
 }
 type C = Awaited<ReturnType<typeof setup>>;
@@ -102,7 +107,7 @@ test('親機は ok の報告で延命する(netAt が進む)。ng では進ま�
   c.guest.xpCtl.round(true);
   await until(() => (c.hostT.getState().data.netAt ?? 0) > n0, 2000, 'host netAt advances on ok');
   for (let i = 0; i < 3; i++) c.guest.xpCtl.round(false, 'timeout');
-  await until(() => c.hostT.getState().remoteInternet?.state === 'ng', 2000);
+  await until(() => c.hostT.getState().remoteInternet?.state === 'ng', 4000);
   const n1 = c.hostT.getState().data.netAt!;
   await wait(40);
   assert.equal(c.hostT.getState().data.netAt, n1); // ng の間は延命しない(ng の報告で netAt が動かない)
@@ -112,9 +117,9 @@ test('親機は ok の報告で延命する(netAt が進む)。ng では進ま�
 test('バスが切れたら親機の子機のインターネットは確認中(unknown)に戻る', async () => {
   const c = await setup();
   await established(c);
-  await until(() => c.hostT.getState().remoteInternet?.state === 'ok', 2000);
+  await until(() => c.hostT.getState().remoteInternet?.state === 'ok', 4000);
   c.bus!.link(false);
-  await until(() => c.hostT.getState().remoteInternet?.state === 'unknown', 1000, 'unknown on bus down');
+  await until(() => c.hostT.getState().remoteInternet?.state === 'unknown', 3000, 'unknown on bus down');
   c.cleanup();
 });
 

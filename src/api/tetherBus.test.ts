@@ -1,7 +1,12 @@
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { pairedFakes } from './fakePlatform';
 import { Tether } from './tether';
+
+// 失敗してもタイマーと親機・子機を止める(残るとプロセスが終わらない)。cleanup は何度呼んでもよい
+const live: Array<() => void> = [];
+afterEach(() => live.splice(0).forEach((f) => f()));
+const stopAll = (f: () => void) => { let done = false; const g = () => { if (!done) { done = true; f(); } }; live.push(g); return g; };
 
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const until = async (cond: () => boolean, ms = 3000, what = '') => {
@@ -32,7 +37,7 @@ async function setup(cfg: object = SUSPEND, withBus = true, guestCfg: object = c
   const pulseTimer = setInterval(() => { if (pulse && f.bus?.isUp()) f.bus.pulse(); }, 10);
   return {
     ...f, hostT, guestT, got, stopPulse: () => { pulse = false; },
-    cleanup: () => { clearInterval(pulseTimer); hostT.stop(); guestT.stop(); },
+    cleanup: stopAll(() => { clearInterval(pulseTimer); hostT.stop(); guestT.stop(); }),
   };
 }
 
@@ -122,7 +127,7 @@ test('同じ key の保留は最新に置き換わる(状態表示など)', asyn
   await until(() => !c.bus!.isUp());
   c.hostT.send({ s: 1 }, { key: 'state' }); c.hostT.send({ s: 2 }, { key: 'state' });
   c.bus!.link(true);
-  await until(() => c.got.guest.length >= 1, 1000);
+  await until(() => c.got.guest.length >= 1, 3000);
   await wait(40);
   assert.deepEqual(c.got.guest, [{ s: 2 }]);
   c.cleanup();

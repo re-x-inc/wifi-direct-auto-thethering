@@ -1,7 +1,12 @@
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { pairedFakes } from './fakePlatform';
 import { Tether } from './tether';
+
+// 失敗してもタイマーと親機・子機を止める(残るとプロセスが終わらない)。cleanup は何度呼んでもよい
+const live: Array<() => void> = [];
+afterEach(() => live.splice(0).forEach((f) => f()));
+const stopAll = (f: () => void) => { let done = false; const g = () => { if (!done) { done = true; f(); } }; live.push(g); return g; };
 import type { Overall } from '../link/dataPath';
 
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -30,7 +35,7 @@ async function setup(cfg: object = SUSPEND, beforeStart?: (f: Awaited<ReturnType
   // ネイティブの ping/pong の代わり(バスが up の間は生存の時刻を進める)
   let pulse = true;
   const pulseTimer = setInterval(() => { if (pulse && f.bus?.isUp()) f.bus.pulse(); }, 10);
-  return { ...f, hostT, guestT, stopPulse: () => { pulse = false; }, cleanup: () => { clearInterval(pulseTimer); hostT.stop(); guestT.stop(); } };
+  return { ...f, hostT, guestT, stopPulse: () => { pulse = false; }, cleanup: stopAll(() => { clearInterval(pulseTimer); hostT.stop(); guestT.stop(); }) };
 }
 
 async function established(c: Awaited<ReturnType<typeof setup>>) {
