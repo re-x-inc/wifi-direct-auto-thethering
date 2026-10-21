@@ -22,8 +22,9 @@ const SUSPEND = {
   timing: { hbIntervalMs: 20, tickMs: 10, echoMs: 60, directMs: 200, nearbyMs: 260, settleMs: 30, retryAttempts: 3, retryBackoffMs: [5], retryJoinTimeoutMs: 50, retryAttemptMs: 50, rejoinMs: 500 },
 };
 
-async function setup(cfg: object = SUSPEND) {
+async function setup(cfg: object = SUSPEND, beforeStart?: (f: Awaited<ReturnType<typeof pairedFakes>>) => void) {
   const f = await pairedFakes();
+  beforeStart?.(f); // Tether は構築時に Nearby 部品を包むので、差し替えは構築の前に行う
   const hostT = new Tether(f.host.platform, cfg);
   const guestT = new Tether(f.guest.platform, cfg);
   // 子機のハートビート(エコー接続)が親機に届く様子を再現する
@@ -224,4 +225,36 @@ test('親機 suspend・子機 keep(方式不一致): 子機は heartbeat を送�
   assert.equal(hostT.getState().overall, 'connected');
   assert.equal(f.net.host.suspendCount + f.net.guest.suspendCount, 0);
   hostT.stop(); guestT.stop();
+});
+
+// 実機 b6 12:18(tether=7815375): 子機が Direct に入ると Wi-Fi LAN 上の Nearby が切れ、子機の wifi-result が親機に届かない。
+// 親機は peerSuspends が分からず、Echo(ハートビート)が届いていても ready に進めなかった。
+test('親機: 子機の wifi-result が届かなくても、ハートビート(Echo)が繰り返し届けば ready → Nearby を止める', async () => {
+  let dropped = 0;
+  const c = await setup(SUSPEND, (f) => {
+    const send = f.net.guest.send.bind(f.net.guest);
+    f.net.guest.send = (id: string, text: string) => { if (text.includes('tether.wifi-result')) { dropped++; return; } return send(id, text); };
+  });
+  await c.hostT.start();
+  await c.guestT.start();
+  await until(() => c.guestT.getState().vpn === 'on', 3000, 'vpn');
+  await until(() => c.hostT.getState().nearby === 'suspended' && c.guestT.getState().nearby === 'suspended', 3000, 'both suspended');
+  assert.ok(dropped >= 1, 'wifi-result を落とせていること');
+  assert.equal(c.hostT.getState().peerReach, null);
+  assert.equal(c.hostT.getState().overall, 'connected');
+  c.cleanup();
+});
+
+test('親機: 子機が keep(wifi-result 未着)で Echo が 1 回だけ(到達確認の probe)なら、ready にしない', async () => {
+  const c = await setup(SUSPEND, (f) => {
+    const send = f.net.guest.send.bind(f.net.guest);
+    f.net.guest.send = (id: string, text: string) => { if (text.includes('tether.wifi-result')) return; return send(id, text); };
+  });
+  c.stopEcho();
+  await c.hostT.start();
+  await wait(50);
+  c.host.emitEcho(); // probe の 1 回だけ
+  await wait(200);
+  assert.equal(c.net.host.suspended, false);
+  c.cleanup();
 });

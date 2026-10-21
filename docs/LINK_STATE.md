@@ -118,6 +118,7 @@ stateDiagram-v2
 | 遷移 | やること | 主なログ(DH-LINK / DH-NEARBY / DH-P2P / DH-ECHO) |
 |---|---|---|
 | Settling → DirectActive | 未確認の送信が ack されるまで最大3s 待つ → 接続を閉じる → 広告・探索・stopAllEndpoints → 1.5s 待つ(`suspend`) | DH-LINK `Nearby を止める`, DH-NEARBY `suspend … / suspend done` |
+| NearbyActive → Settling(親機・wifi-result 未着) | 子機が Direct に入ると Wi-Fi LAN 上の Nearby が切れ、子機の wifi-result(方式の報告・到達確認)が親機に届かないことがある(実機 b6 12:18)。報告が無いまま Echo が hb/2 以上あけて 2 回以上届いたら、子機は suspend・到達確認 OK とみなして ready にする(ハートビートは suspend の子機だけが送る。probe の 1 回では推定しない)。あとで wifi-result が届けばそちらを優先 | DH-LINK `子機の方式の報告(wifi-result)が未着のまま Echo が n 回届いた`, `direct ready` |
 | DirectActive → Retrying | Nearby は触らない。親機: group が無ければ固定グループ再作成(最大3回)、あれば維持して子機を待つ。子機: 到達確認 → だめなら入り直し(最大3回) | DH-LINK `Direct 再接続 attempt=n/3 reason=…` |
 | Retrying → DirectActive | 何もしない(Nearby は再開しない) | DH-LINK `Direct に戻った` |
 | Retrying → NearbyActive | `resume`(Nearby の要求を再び受け付ける)→ 広告(親機)/ 探索(子機) | DH-LINK `Nearby を再開(理由=…)`, DH-NEARBY `resume` |
