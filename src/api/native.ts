@@ -45,6 +45,13 @@ export function nativePlatform(): TetherPlatform {
         const sub = Hotspot.addListener('onHeartbeat', (e) => cb(e));
         return () => sub.remove();
       },
+      externalProbeStart: (o) => Hotspot.externalProbeStart(o),
+      externalProbeStop: () => Hotspot.externalProbeStop(),
+      externalProbeStatus: () => Hotspot.externalProbeStatus(),
+      onExternalProbe: (cb) => {
+        const sub = Hotspot.addListener('onExternalProbe', (e) => cb(e));
+        return () => sub.remove();
+      },
       onWifiLost: (cb) => {
         const sub = Hotspot.addListener('onWifiLost', () => cb());
         return () => sub.remove();
