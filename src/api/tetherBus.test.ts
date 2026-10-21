@@ -21,10 +21,10 @@ const SUSPEND = {
   timing: { hbIntervalMs: 20, tickMs: 10, echoMs: 60, directMs: 200, nearbyMs: 260, settleMs: 30, retryAttempts: 3, retryBackoffMs: [5], retryJoinTimeoutMs: 50, retryAttemptMs: 50, rejoinMs: 500 },
 };
 
-async function setup(cfg: object = SUSPEND, withBus = true) {
-  const f = await pairedFakes({}, { bus: withBus });
+async function setup(cfg: object = SUSPEND, withBus = true, guestCfg: object = cfg, nativeHb = false) {
+  const f = await pairedFakes({ nativeHeartbeat: nativeHb }, { bus: withBus });
   const hostT = new Tether(f.host.platform, cfg);
-  const guestT = new Tether(f.guest.platform, cfg);
+  const guestT = new Tether(f.guest.platform, guestCfg);
   const got = { host: [] as unknown[], guest: [] as unknown[] };
   hostT.onMessage((b) => got.host.push(b));
   guestT.onMessage((b) => got.guest.push(b));
@@ -193,5 +193,51 @@ test('旧版の親機(busPort を送らない)・バス部品なしの端末: �
   assert.equal(c.hostT.getState().nearby, 'suspended');
   assert.equal(c.got.host.length, 0); // suspend 中の Nearby は止まっているので溜まるだけ(従来の挙動)
   assert.ok(c.guestT.getState().pending >= 1);
+  c.cleanup();
+});
+
+test('実効方式が suspend でない(子機が keep)ときは、バスを起動せず Nearby で届く', async () => {
+  const keep = { link: SUSPEND.link, connectTimeoutMs: 100, probeIntervalMs: 1, nearbyWhileDirect: 'keep' as const };
+  const c = await setup(SUSPEND, true, keep);
+  await c.hostT.start(); await c.guestT.start();
+  await until(() => c.guestT.getState().vpn === 'on');
+  await until(() => c.guestT.getState().link === 'connected', 2000, 'nearby');
+  await wait(100);
+  assert.deepEqual(c.bus!.ctl.starts.filter((x) => x === 'guest'), []);
+  c.guestT.send({ type: 'accept' });
+  await until(() => c.got.host.length === 1, 1000, 'delivered over nearby');
+  assert.deepEqual(c.bus!.ctl.sent.guest, []);
+  c.cleanup();
+});
+
+test('ネイティブ heartbeat: バス接続中は Echo(ネイティブ)を止め、バス断で再開する', async () => {
+  const c = await setup(SUSPEND, true, SUSPEND, true);
+  // ネイティブの Echo の代わり(running の間だけ親機に Echo を届ける)
+  const timer = setInterval(() => {
+    const hb = c.guest.ctl.hb;
+    if (!hb.running) return;
+    const now = Date.now(); hb.lastAttemptAt = now; hb.lastOkAt = now; hb.consecutiveFailures = 0; c.host.emitEcho();
+  }, 10);
+  await established(c);
+  await until(() => c.bus!.isUp());
+  await wait(100);
+  const starts0 = c.guest.calls.filter((x) => x.startsWith('hbStart:')).length;
+  assert.equal(starts0, 0, 'バスが新しい間はネイティブ Echo を始めない(始まっていても止める)');
+  await wait(150);
+  assert.equal(c.guestT.getState().overall, 'connected'); // Echo なしでもバスの生存信号で connected
+  assert.equal(c.hostT.getState().overall, 'connected');
+  c.bus!.link(false); c.stopPulse();
+  await until(() => c.guest.calls.filter((x) => x.startsWith('hbStart:')).length > starts0, 1000, 'native echo resumed after bus down');
+  clearInterval(timer);
+  c.cleanup();
+});
+
+test('Echo が一度も届かなくても、バスが認証済みなら親機は Nearby を止める(Echo の回数推定に頼らない)', async () => {
+  const c = await setup();
+  c.stopEcho(); // Echo は一度も届かない
+  await c.hostT.start();
+  await c.guestT.start();
+  await until(() => c.hostT.getState().nearby === 'suspended', 4000, 'host suspended by bus ready');
+  assert.equal(c.hostT.getState().data.echoAt, null);
   c.cleanup();
 });
