@@ -122,7 +122,10 @@ test('Tether: 診断レポートの作成と保存。Planner 用の能力を含�
   const f = fakePlatform(net.host, { cellular: true, model: 'Pixel 7a' });
   const t = new Tether(f.platform);
   const r = await t.diagnosticReport();
-  assert.deepEqual(r.capabilities, await t.capabilities());
+  // 取得した時刻(collectedAt)は呼ぶたびに変わるので、中身だけ比べる
+  const { collectedAt: _t1, ...capsA } = r.capabilities as any;
+  const { collectedAt: _t2, ...capsB } = (await t.capabilities()) as any;
+  assert.deepEqual(capsA, capsB);
   assert.equal(r.sections.build.model.v, 'Pixel 7a');
   const saved = await t.saveDiagnosticReport();
   assert.equal(saved.fileName, 'tether-diag-fake-pixel-7a-api35.json');
