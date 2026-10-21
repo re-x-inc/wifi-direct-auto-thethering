@@ -97,6 +97,18 @@ export interface MessageMeta {
 
 // ---- 端末側の部品(テストでは偽物に差し替える) ----
 
+export interface NativeHeartbeatStatus {
+  running: boolean;
+  lastAttemptAt: number;
+  lastOkAt: number;
+  lastFailAt: number;
+  lastError: string | null;
+  lastRttMs: number;
+  consecutiveFailures: number;
+  attempts: number;
+  intervalMs: number;
+}
+
 export interface HotspotPort {
   startHotspot(): Promise<{ ssid: string; passphrase: string }>;
   stopHotspot(): void;
@@ -116,6 +128,16 @@ export interface HotspotPort {
   bindToJoined(): boolean;
   unbindProcess(): void;
   probe(host: string, port: number): Promise<{ ok: boolean; rttMs?: number; error?: string }>;
+  /**
+   * 子機: ハートビート(親機のエコーへの定期接続)をネイティブで続ける(省略可。無い部品では JS の heartbeatLoop で動く)。
+   * JS が止まっても(裏・画面オフ・Doze)続く。参加した Wi-Fi に bind して接続する(probe と同じ経路)。
+   */
+  heartbeatStart?(o: { host: string; port: number; intervalMs: number; timeoutMs: number; screenOffIntervalMs?: number; wakeLock?: boolean }): void;
+  heartbeatStop?(): void;
+  /** ネイティブが保持する最新の結果。時刻は Date.now() と同じ時計(0 = まだ無い) */
+  heartbeatStatus?(): NativeHeartbeatStatus;
+  /** ネイティブのハートビート結果が出るたび(JS が起きている間)。戻り値で購読解除 */
+  onHeartbeat?(cb: (st: NativeHeartbeatStatus) => void): () => void;
   /** Wi-Fi 切断(参加先が消えた)の通知。戻り値で購読解除 */
   onWifiLost(cb: () => void): () => void;
   /** 親機: Direct グループの変化(消滅・クライアント数)。省略可(古いネイティブでは来ない=グループの有無は不明として扱う) */
@@ -184,6 +206,10 @@ export interface TetherConfig {
   /** true: Nearby/Direct の不変条件(src/link/linkGovernor.ts)に違反したら例外を投げる(テスト用)。既定 false=拒否して DH-LINK にログ */
   strictLinkGuard?: boolean;
   nearbyWhileDirect?: 'keep' | 'suspend';
+  /** 子機のハートビートを画面オフ中だけ延ばす間隔(ms)。省略=延ばさない。T_echo の半分を超えない範囲に丸める */
+  hbScreenOffIntervalMs?: number;
+  /** ネイティブのハートビートが動いている間 PARTIAL_WAKE_LOCK を保持するか。既定 true */
+  hbWakeLock?: boolean;
   /**
    * 時間の設定（開始待ち・タイムアウト・閾値。すべて任意）。範囲外は既定に丸めてログ、T_echo < T_direct < T_nearby は補正してログ。
    * 型・既定・範囲は src/link/timingConfig.ts。start() のたびに「既定 < ここ < setTimingOverride で保存した値」で決まり、

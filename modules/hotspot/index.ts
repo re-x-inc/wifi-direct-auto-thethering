@@ -9,9 +9,23 @@ type Events = {
   onDirectGroup(e: { up: boolean; clients: number; appInitiated: boolean }): void;
   /** 親機: エコー(9000)に子機が接続してきた(子機のハートビート) */
   onEchoAccept(e: Record<string, never>): void;
+  /** 子機: ネイティブのハートビートの結果が出た(成功・失敗のたび。JS が起きている間だけ届く) */
+  onHeartbeat(e: HeartbeatStatus): void;
   /** 子機の Wi-Fi 参加。phase 'show' = 端末の許可画面が出る(「接続」を押してもらう)。ok/declined/timeout/cancelled = 終わり */
   onJoinPrompt(e: { ssid: string; phase: 'show' | 'ok' | 'declined' | 'timeout' | 'cancelled'; timeoutMs?: number }): void;
 };
+
+export interface HeartbeatStatus {
+  running: boolean;
+  lastAttemptAt: number;
+  lastOkAt: number;
+  lastFailAt: number;
+  lastError: string | null;
+  lastRttMs: number;
+  consecutiveFailures: number;
+  attempts: number;
+  intervalMs: number;
+}
 
 export interface NativeCapabilities {
   manufacturer: string | null;
@@ -58,6 +72,10 @@ declare class HotspotModule extends NativeModule<Events> {
   suggestWifi(ssid: string, pass: string): Promise<{ gateway: string; reused?: boolean }>;
   bindToJoined(): boolean;
   unbindProcess(): void;
+  /** 子機: ハートビートをネイティブのスレッドで続ける(JS が止まっても動く)。参加した Wi-Fi に bind して接続する */
+  heartbeatStart(host: string, port: number, intervalMs: number, timeoutMs: number, screenOffIntervalMs: number, wakeLock: boolean): void;
+  heartbeatStop(): void;
+  heartbeatStatus(): HeartbeatStatus;
   probe(host: string, port: number): Promise<{ ok: boolean; rttMs?: number; error?: string }>;
 }
 

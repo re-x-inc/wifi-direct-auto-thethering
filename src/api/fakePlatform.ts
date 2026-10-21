@@ -14,7 +14,7 @@ export const testRandomHex = (bytes: number) =>
   Array.from({ length: bytes }, () => ((n++ * 37 + 11) % 256).toString(16).padStart(2, '0')).join('');
 
 /** 端末の部品の偽物。呼び出しを calls に記録する。 */
-export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; directDelayMs?: number; joinError?: string; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[]; backgroundLocation?: boolean } = {}) {
+export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; directDelayMs?: number; joinError?: string; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[]; backgroundLocation?: boolean; nativeHeartbeat?: boolean } = {}) {
   const calls: string[] = [];
   const files: Record<string, string> = {};
   const wifiLost = new Set<() => void>();
@@ -23,7 +23,14 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
   const groupCbs = new Set<(e: { up: boolean; clients: number; appInitiated?: boolean }) => void>();
   const echoCbs = new Set<() => void>();
   /** テストから切り替える: probe(ハートビート/到達確認)の成否、joinWifi の失敗 */
-  const ctl = { probeOk: true, joinFails: 0 };
+  const ctl = {
+    probeOk: true, joinFails: 0,
+    /** o.nativeHeartbeat のとき: ネイティブが保持する結果(テストが書き換える)。start されるまで running=false */
+    hb: { running: false, lastAttemptAt: 0, lastOkAt: 0, lastFailAt: 0, lastError: null as string | null, lastRttMs: -1, consecutiveFailures: 0, attempts: 0, intervalMs: 0 },
+    /** ネイティブの onHeartbeat イベントを流す */
+    hbEmit: () => { for (const cb of hbCbs) cb({ ...ctl.hb }); },
+  };
+  const hbCbs = new Set<(st: typeof ctl.hb) => void>();
   const hotspot: HotspotPort = {
     startHotspot: async () => (calls.push('startHotspot'), { ssid: 'AndroidShare_1', passphrase: 'lohspass' }),
     stopHotspot: () => void calls.push('stopHotspot'),
@@ -54,6 +61,15 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     bindToJoined: () => true,
     unbindProcess: () => void calls.push('unbind'),
     probe: async () => (ctl.probeOk ? { ok: true, rttMs: 3 } : { ok: false, error: 'ECONNREFUSED' }),
+    ...(o.nativeHeartbeat ? {
+      heartbeatStart: (a: { host: string; port: number; intervalMs: number; timeoutMs: number; screenOffIntervalMs?: number; wakeLock?: boolean }) => {
+        calls.push(`hbStart:${a.host}:${a.port}:${a.intervalMs}:${a.timeoutMs}:${a.screenOffIntervalMs ?? '-'}:${a.wakeLock ?? '-'}`);
+        ctl.hb = { ...ctl.hb, running: true, intervalMs: a.intervalMs };
+      },
+      heartbeatStop: () => { calls.push('hbStop'); ctl.hb = { ...ctl.hb, running: false }; },
+      heartbeatStatus: () => ({ ...ctl.hb }),
+      onHeartbeat: (cb: (st: typeof ctl.hb) => void) => (hbCbs.add(cb), () => hbCbs.delete(cb)),
+    } : {}),
     onJoinPrompt: (cb) => (joinPrompt.add(cb), () => joinPrompt.delete(cb)),
     onWifiLost: (cb) => (wifiLost.add(cb), () => wifiLost.delete(cb)),
   };
@@ -111,7 +127,7 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
 }
 
 /** 両端末に同じ共有コードのペアを入れた、親機・子機の偽プラットフォーム(fakeNearbyPair の端末名に合わせる) */
-export async function pairedFakes(guestOpts: { joinError?: string } = {}) {
+export async function pairedFakes(guestOpts: { joinError?: string; nativeHeartbeat?: boolean } = {}) {
   const net = fakeNearbyPair();
   const host = fakePlatform(net.host, { cellular: true });
   const guest = fakePlatform(net.guest, { cellular: false, ...guestOpts });
