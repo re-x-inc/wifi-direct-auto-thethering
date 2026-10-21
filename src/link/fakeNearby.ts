@@ -10,7 +10,7 @@ type Handler = (e: any) => void;
  */
 export function fakeNearbyPair() {
   type Side = NearbyApi & {
-    name: string; directActive: boolean[]; advertising: boolean; discovering: boolean; endpoint: string | null;
+    name: string; directActive: boolean[]; suspended: boolean; leaked: string[]; suspendCount: number; notes: string[]; advertising: boolean; discovering: boolean; endpoint: string | null;
     emit(ev: string, e: any): void; label: string;
   };
   let connected = false;
@@ -19,12 +19,16 @@ export function fakeNearbyPair() {
   const make = (name: string, label: 'H' | 'G'): Side => {
     const h = new Map<string, Set<Handler>>();
     const side: Side = {
-      name, label, directActive: [], advertising: false, discovering: false, endpoint: null,
+      name, label, directActive: [], suspended: false, leaked: [], suspendCount: 0, notes: [], advertising: false, discovering: false, endpoint: null,
       emit: (ev, e) => h.get(ev)?.forEach((cb) => cb(e)),
       setDirectActive(on: boolean) { side.directActive.push(on); },
-      advertise() { side.advertising = true; tryFind(); },
-      discover() { side.discovering = true; tryFind(); },
+      async suspend() { side.suspended = true; side.suspendCount++; side.advertising = false; side.discovering = false; if (connected) drop(); },
+      resume() { side.suspended = false; },
+      note(l: string) { side.notes.push(l); },
+      advertise() { if (side.suspended) { side.leaked.push('advertise'); return; } side.advertising = true; tryFind(); },
+      discover() { if (side.suspended) { side.leaked.push('discover'); return; } side.discovering = true; tryFind(); },
       requestConnect() {
+        if (side.suspended) { side.leaked.push('requestConnect'); return; }
         queueMicrotask(() => {
           if (connected || !host.advertising) return;
           connected = true;

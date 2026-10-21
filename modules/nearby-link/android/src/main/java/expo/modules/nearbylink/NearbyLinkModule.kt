@@ -14,6 +14,7 @@ import com.google.android.gms.nearby.connection.Payload
 import com.google.android.gms.nearby.connection.PayloadCallback
 import com.google.android.gms.nearby.connection.PayloadTransferUpdate
 import com.google.android.gms.nearby.connection.Strategy
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import javax.crypto.Mac
@@ -37,6 +38,9 @@ private const val LINK_TICK_MS = 5_000L
 // 実機(razr=GO)で Nearby のアップグレードが固定の Direct グループを消した疑いがあるため。ただし BLE だけだと 8007 で繋がらない前例があるので、
 // この時間つながらなければ通常の lowPower=false に戻す(下の時間割)。ペアリング中は対象外
 private const val DIRECT_LOW_MS = 20_000L
+// suspend(): stopAdvertising/stopDiscovery/stopAllEndpoints は完了通知が無い(void)。GMS の後始末が済むまでこの時間待ってから返す
+// (このあとで Direct グループを作り直しても、Nearby の帯域アップグレード/切断処理と重ならないようにする)
+private const val SUSPEND_SETTLE_MS = 1_500L
 
 /**
  * Nearby に使わせる medium の切り替え(試験で比べるため 1 か所):
@@ -231,6 +235,8 @@ class NearbyLinkModule : Module() {
   private var curLow: Boolean? = null
   /** Wi-Fi Direct が張れている間 true(JS から setDirectActive で知らされる) */
   @Volatile private var directActive = false
+  /** suspend() 中 true。Wi-Fi Direct が生きている間 Nearby を一切使わない(広告・探索・接続の要求は無視する) */
+  @Volatile private var suspended = false
   private val powerTick = object : Runnable {
     override fun run() {
       if (pairing || (advName == null && !discovering)) return
@@ -340,6 +346,7 @@ class NearbyLinkModule : Module() {
 
   private val discovery = object : EndpointDiscoveryCallback() {
     override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
+      if (suspended) return
       foundNames[endpointId] = info.endpointName
       if (knownNames.size > 64) knownNames.clear()
       knownNames[endpointId] = info.endpointName
@@ -364,6 +371,7 @@ class NearbyLinkModule : Module() {
    * 回数は REDISCOVER_MAX、全体の時間は REDISCOVER_TOTAL_MS まで。尽きたら何もせず(失敗は onError で通知済み)終える。
    */
   private fun startRediscover(peerName: String?, myName: String, done: Int, deadlineIn: Long, why: Int) {
+    if (suspended) { DhLog.i("DH-NEARBY", "rediscover skipped: suspended"); return }
     val now = android.os.SystemClock.elapsedRealtime()
     // 全体の期限は、最初の探索やり直しを始めた時点から数える(0 = まだ始めていない)
     val deadline = if (deadlineIn == 0L) now + REDISCOVER_TOTAL_MS else deadlineIn
@@ -408,6 +416,7 @@ class NearbyLinkModule : Module() {
    * rediscovered は探索をやり直した回数。始めの呼び出し(JS から)は 0 で、全体の期限もそこから数える。
    */
   private fun requestWithRetry(endpointId: String, name: String, attempt: Int, rediscovered: Int = 0, deadline: Long = 0L, peerIn: String? = null) {
+    if (suspended) { release(endpointId); DhLog.i("DH-NEARBY", "requestConnection skipped: suspended ep=$endpointId"); return }
     // 相手の広告名: 引き継いだもの → 探索で見えているもの → 以前見えたもの の順。stop() で探索の記録が消えても追えるようにする
     val peerName = peerIn ?: foundNames[endpointId] ?: knownNames[endpointId]
     // 直前の失敗の後始末が済むまで待つ(重ねると 8009)。待つ間も、この endpoint の枠(inFlight)は持ったまま
@@ -476,6 +485,7 @@ class NearbyLinkModule : Module() {
 
     // 1対1。待っている間(広告・探索)は省電力(BLE のみ)。接続要求だけ省電力を外す(requestWithRetry)
     Function("advertise") { name: String ->
+      if (suspended) { DhLog.w("DH-NEARBY", "advertise ignored: suspended (Direct が生きている間は Nearby を使わない)"); return@Function null }
       // ペアリング中(名前が P| で始まる)だけ省電力を外す。BLE だけだと 8007 で繋がらないことがあり、Bluetooth Classic / Wi-Fi も使えるようにする。終わったら stop() か通常の名前で省電力に戻る
       pairing = name.startsWith("P|")
       if (!pairing) touchLink()
@@ -488,6 +498,7 @@ class NearbyLinkModule : Module() {
       if (!pairing) mainHandler.postDelayed(powerTick, LINK_TICK_MS)
     }
     Function("discover") {
+      if (suspended) { DhLog.w("DH-NEARBY", "discover ignored: suspended (Direct が生きている間は Nearby を使わない)"); return@Function null }
       if (!pairing) touchLink()
       clearRediscover()
       client.stopDiscovery()
@@ -497,6 +508,7 @@ class NearbyLinkModule : Module() {
       if (!pairing) mainHandler.postDelayed(powerTick, LINK_TICK_MS)
     }
     Function("requestConnect") { endpointId: String, name: String ->
+      if (suspended) { DhLog.w("DH-NEARBY", "requestConnect ignored: suspended ep=$endpointId"); return@Function null }
       // endpoint ごとに 1 つだけ進行中。進行中なら新しく出さない(JS の onFound 重複・探索やり直しとの二重呼び出しを止める)
       if (inFlight.add(endpointId)) requestWithRetry(endpointId, name, 0)
       else DhLog.i("DH-NEARBY", "requestConnect skipped: already in flight ep=$endpointId")
@@ -505,6 +517,28 @@ class NearbyLinkModule : Module() {
       if (directActive != on) DhLog.i("DH-NEARBY", "directActive=$on")
       directActive = on
     }
+    /**
+     * Nearby を全部止める(Wi-Fi Direct が生きている間、Nearby の再接続による帯域アップグレードで固定グループを壊されないため)。
+     * stopAllEndpoints には完了通知が無いので、SUSPEND_SETTLE_MS 待ってから返す。resume() まで advertise/discover/requestConnect は無視。
+     */
+    AsyncFunction("suspend") { promise: Promise ->
+      DhLog.i("DH-NEARBY", "suspend: stopAdvertising/stopDiscovery/stopAllEndpoints connected=${connected.size} inFlight=${inFlight.size} directActive=$directActive")
+      suspended = true
+      mainHandler.removeCallbacks(powerTick)
+      clearRediscover()
+      advName = null; discovering = false; curLow = null; pairing = false
+      connected.clear(); inFlight.clear(); foundNames.clear(); diags.clear(); settleUntil = 0L
+      client.stopAdvertising(); client.stopDiscovery(); client.stopAllEndpoints()
+      mainHandler.postDelayed({
+        DhLog.i("DH-NEARBY", "suspend done (settle ${SUSPEND_SETTLE_MS}ms 経過): Nearby は止まっている")
+        promise.resolve(null)
+      }, SUSPEND_SETTLE_MS)
+    }
+    Function("resume") {
+      if (suspended) DhLog.i("DH-NEARBY", "resume: Nearby の要求を再び受け付ける")
+      suspended = false
+    }
+    Function("note") { line: String -> DhLog.i("DH-LINK", line) }
     Function("accept") { endpointId: String -> client.acceptConnection(endpointId, payloads) }
     Function("reject") { endpointId: String -> client.rejectConnection(endpointId) }
     Function("send") { endpointId: String, text: String ->

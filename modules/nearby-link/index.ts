@@ -23,6 +23,11 @@ declare class NearbyLinkModule extends NativeModule<Events> {
   stop(): void;
   hmac(secret: string, data: string): string;
   setDirectActive(on: boolean): void;
+  /** 広告・探索・接続・stopAllEndpoints を止め、後始末が済むまで待つ。resume() まで advertise / discover / requestConnect は無視される */
+  suspend(): Promise<void>;
+  resume(): void;
+  /** DH-LINK に 1 行残す(JS 側の判定理由・状態遷移・違反を logcat で追うため) */
+  note(line: string): void;
 }
 
 export default requireNativeModule<NearbyLinkModule>('NearbyLink');

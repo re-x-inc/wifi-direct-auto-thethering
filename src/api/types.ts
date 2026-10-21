@@ -1,4 +1,6 @@
 import type { NearbyApi } from '../link/nearbyTransport';
+import type { DataPath, NearbyPhase, Overall } from '../link/dataPath';
+import type { DirectRetry, GuardTiming } from '../link/directGuard';
 import type { Options as LinkTiming, SendOptions } from '../link/supervisor';
 import type { KeyValue } from '../pairing/types';
 import type { CapabilityPort } from './capability';
@@ -46,6 +48,18 @@ export interface TetherState {
   vpn: 'off' | 'awaiting-permission' | 'starting' | 'on' | 'failed' | 'held';
   /** 直近の方式判断(親機が決め、子機へ通知されたもの)。まだ無ければ null */
   plan: LinkPlan | null;
+  /**
+   * Nearby(制御用)の状態。up = つながっている / down = つながっていない(探索・再接続中) / suspended = Direct が生きている間、意図して止めている。
+   * 'suspended' は異常ではない。「つながっているか」は overall を見る(nearby は制御メッセージが届くかの参考)
+   */
+  nearby: NearbyPhase;
+  /** データ経路の詳細(親機: グループの有無・子機のエコー最終受付 / 子機: Wi-Fi 参加・ハートビート・到達確認) */
+  data: DataPath;
+  /**
+   * 総合状態。**データ経路だけ**で決まる(Nearby の link には依存しない)。
+   * connected = データが流れる / degraded = 経路の一部はあるが確認できていない / disconnected = データ経路がない
+   */
+  overall: Overall;
   /** 切断中などで、まだ相手に届いていない送信メッセージの数 */
   pending: number;
   /** 直近の失敗(画面に出す用)。成功したら null に戻る */
@@ -87,7 +101,8 @@ export interface HotspotPort {
   socksSelfTest(port: number, user: string, pass: string): Promise<{ ok: boolean; line?: string; error?: string; udp?: boolean }>;
   startEcho(port: number): void;
   stopEcho(): void;
-  joinWifi(ssid: string, pass: string): Promise<{ gateway: string; reused?: boolean }>;
+  /** timeoutMs: 参加の待ち時間(省略は初回の承認待ちを見込んだ長い既定)。保存済みの接続情報での再接続は短く指定する */
+  joinWifi(ssid: string, pass: string, timeoutMs?: number): Promise<{ gateway: string; reused?: boolean }>;
   leaveWifi(): void;
   /** 親機が今つないでいる Wi-Fi の周波数(MHz)。未接続は 0 */
   wifiFrequency(): number;
@@ -97,6 +112,10 @@ export interface HotspotPort {
   probe(host: string, port: number): Promise<{ ok: boolean; rttMs?: number; error?: string }>;
   /** Wi-Fi 切断(参加先が消えた)の通知。戻り値で購読解除 */
   onWifiLost(cb: () => void): () => void;
+  /** 親機: Direct グループの変化(消滅・クライアント数)。省略可(古いネイティブでは来ない=グループの有無は不明として扱う) */
+  onDirectGroup?(cb: (e: { up: boolean; clients: number; appInitiated?: boolean }) => void): () => void;
+  /** 親機: エコー(9000)への子機の接続(子機のハートビート)。省略可 */
+  onEchoAccept?(cb: () => void): () => void;
   /**
    * 子機: 端末の Wi-Fi 接続許可の画面が出る/閉じる通知(省略可)。phase 'show' = 出ている。
    * ok/declined/timeout/cancelled = 終わり。戻り値で購読解除
@@ -150,6 +169,19 @@ export interface TetherConfig {
   vpnPermissionWaitSec?: number;
   /** 親機: 子機の能力を待つ最長時間(ms)。キャッシュがあれば待たない。既定 5000 */
   capsWaitMs?: number;
+  /**
+   * Wi-Fi Direct が生きている間の Nearby の扱い(両端末で同じにする。片方だけ 'suspend' のときは 'keep' のまま動く)。
+   * 'keep'    = 従来どおり(Direct 中も Nearby をつなぎ続ける)
+   * 'suspend' = Direct が確立したら Nearby の広告・探索・接続を止め、Direct が切れたときだけ再開する
+   * 既定 'keep'(実機確認後に 'suspend' へ変える想定)
+   */
+  /** true: Nearby/Direct の不変条件(src/link/linkGovernor.ts)に違反したら例外を投げる(テスト用)。既定 false=拒否して DH-LINK にログ */
+  strictLinkGuard?: boolean;
+  nearbyWhileDirect?: 'keep' | 'suspend';
+  /** suspend 方式の時間(テスト用に短くできる)。hbIntervalMs = 子機のハートビート間隔(既定 5000。T_echo=×3、T_direct=T_echo+再接続3回×45s=150s、T_nearby=T_direct+T_echo=165s)、tickMs = 判定の周期(既定 1000) */
+  /** Direct が切れたと分かったとき、Nearby に戻る前に保存済みの接続情報で Direct を再接続する回数・間隔(既定 3 回・1s/2s/4s・1回の参加待ち40s) */
+  directRetry?: Partial<DirectRetry>;
+  directGuard?: Partial<GuardTiming> & { hbIntervalMs?: number; tickMs?: number };
   /** 方式判断の方針(台数の上限・既存接続の扱いなど) */
   planPolicy?: Partial<PlanPolicy>;
 }

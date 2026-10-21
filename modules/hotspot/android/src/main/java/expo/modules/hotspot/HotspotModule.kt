@@ -64,6 +64,8 @@ class HotspotModule : Module() {
   private var joinPending: String? = null
   private val joinWaiters = mutableListOf<Promise>()
   private var joinGen = 0
+  // joinWifi ごとの待ち時間。保存済みの接続情報での再接続は短く(JS が指定)、省略は JOIN_TIMEOUT_MS(初回の承認待ち)
+  @Volatile private var joinTimeoutMs = JOIN_TIMEOUT_MS
   private var joinTimeout: Runnable? = null
   // 親機: グループが「できた」あと、いつ・なぜ消えたかをログに残すための状態
   private var groupUp = false
@@ -75,7 +77,7 @@ class HotspotModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("Hotspot")
-    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "log")
+    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "onDirectGroup", "onEchoAccept", "log")
     OnCreate { DhLog.sink = { tag, line -> sendEvent("log", mapOf("tag" to tag, "line" to line)) } }
     OnDestroy { DhLog.sink = null }
 
@@ -263,7 +265,10 @@ class HotspotModule : Module() {
         while (!s.isClosed) {
           try {
             val c = s.accept()
-            DhLog.i("DH-ECHO", "accept from ${c.inetAddress?.hostAddress}")
+            // 子機のハートビートが数秒おきに来るので、ログは 30 秒に 1 回だけ(最初の 1 回は必ず)。JS へは毎回知らせる
+            val nowMs = android.os.SystemClock.elapsedRealtime()
+            if (nowMs - lastEchoLog > 30_000L) { DhLog.i("DH-ECHO", "accept from ${c.inetAddress?.hostAddress} (以降のハートビートは 30 秒に 1 回だけ記録)"); lastEchoLog = nowMs }
+            sendEvent("onEchoAccept", emptyMap<String, Any>())
             Thread {
               c.use { sock ->
                 val buf = ByteArray(256)
@@ -283,7 +288,8 @@ class HotspotModule : Module() {
 
     // ---- 子機 ----
     /** 接続情報で Wi-Fi に参加し、ゲートウェイ(=親機)のアドレスを返す。初回は端末の承認ダイアログが出る。 */
-    AsyncFunction("joinWifi") { ssid: String, pass: String, promise: Promise ->
+    AsyncFunction("joinWifi") { ssid: String, pass: String, timeoutMs: Int?, promise: Promise ->
+      joinTimeoutMs = if (timeoutMs != null && timeoutMs > 0) timeoutMs.toLong() else JOIN_TIMEOUT_MS
       // 同じ SSID に接続済みなら張り直さない(切断と承認ダイアログの再表示を避ける)
       val gw0 = joinedGw
       if (joined != null && joinedSsid == ssid && gw0 != null) {
@@ -665,8 +671,13 @@ class HotspotModule : Module() {
             if (g == null && groupUp) {
               groupUp = false
               DhLog.w(TAG, "group gone ${p2pStamp()} reason=${groupEndReason ?: "アプリが消していない(システム・他アプリ・Wi-Fi 切替のどれか)"}")
+              // JS へ: データ経路(Direct グループ)の消滅。アプリが消した場合は appInitiated=true(JS は無視する)
+              sendEvent("onDirectGroup", mapOf("up" to false, "clients" to 0, "appInitiated" to (groupEndReason != null)))
               groupEndReason = null
-            } else if (g != null) DhLog.i(TAG, "group changed ${p2pStamp()} ssid=${g.networkName} isGO=${g.isGroupOwner} clients=${g.clientList.size}")
+            } else if (g != null) {
+              DhLog.i(TAG, "group changed ${p2pStamp()} ssid=${g.networkName} isGO=${g.isGroupOwner} clients=${g.clientList.size}")
+              sendEvent("onDirectGroup", mapOf("up" to true, "clients" to g.clientList.size, "appInitiated" to false))
+            }
           }
           WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
             val st = i.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1)
@@ -758,8 +769,8 @@ class HotspotModule : Module() {
       }
     }
     netCb = cb
-    DhLog.i(TAG, "joinWifi requestNetwork ssid=$ssid attempt=$attempt setBand=$usedBand timeout=${JOIN_TIMEOUT_MS}ms")
-    if (!bandFallback) sendEvent("onJoinPrompt", mapOf("ssid" to ssid, "phase" to "show", "timeoutMs" to JOIN_TIMEOUT_MS)) // 再要求では show を二重に出さない
+    DhLog.i(TAG, "joinWifi requestNetwork ssid=$ssid attempt=$attempt setBand=$usedBand timeout=${joinTimeoutMs}ms")
+    if (!bandFallback) sendEvent("onJoinPrompt", mapOf("ssid" to ssid, "phase" to "show", "timeoutMs" to joinTimeoutMs)) // 再要求では show を二重に出さない
     cm.requestNetwork(req, cb)
     joinTimeout = Runnable {
       if (gen != joinGen) return@Runnable
@@ -773,10 +784,10 @@ class HotspotModule : Module() {
       val reason = when (sc?.expected) { false -> "not-found"; true -> "awaiting-approval"; null -> "timeout" }
       runCatching { cm.unregisterNetworkCallback(cb) } // 取り下げて、承認ダイアログを残さない
       if (netCb === cb) netCb = null
-      DhLog.w(TAG, "join timeout ssid=$ssid after ${JOIN_TIMEOUT_MS}ms reason=$reason -> give up (やり直しは呼び出し側)")
+      DhLog.w(TAG, "join timeout ssid=$ssid after ${joinTimeoutMs}ms reason=$reason -> give up (やり直しは呼び出し側)")
       finishJoin("timeout", joinFailure(reason, sc))
     }
-    mainHandler.postDelayed(joinTimeout!!, JOIN_TIMEOUT_MS)
+    mainHandler.postDelayed(joinTimeout!!, joinTimeoutMs)
   }
 
   private fun finishJoin(phase: String, error: String?, gw: String? = null) {
@@ -825,6 +836,7 @@ class HotspotModule : Module() {
 
   companion object {
     @Volatile private var activeEcho: ServerSocket? = null
+    @Volatile private var lastEchoLog = 0L
     /** 子機の参加で setBand(2.4GHz) 付きが通るか。null=未確認 / true=付きで成功 / false=なしで成功(プロセス内で記憶) */
     @Volatile private var joinBandPref: Boolean? = null
   }

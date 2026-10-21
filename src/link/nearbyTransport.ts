@@ -16,6 +16,15 @@ export interface NearbyApi {
   hmac(secret: string, data: string): string;
   /** Wi-Fi Direct が張れている間 true。Nearby の再接続を低電力で始める(未実装のネイティブでは無し) */
   setDirectActive?(on: boolean): void;
+  /**
+   * Nearby の広告・探索・接続・stopAllEndpoints をすべて止め、完了(後始末の待ちを含む)まで待つ。resume() まで advertise / discover / requestConnect は無視される。
+   * Direct が生きている間 Nearby を使わないため(未実装のネイティブでは無し)
+   */
+  suspend?(): Promise<void>;
+  /** suspend の解除。広告・探索は呼び出し側が改めて始める */
+  resume?(): void;
+  /** 判定の理由・状態遷移・違反を DH-LINK(logcat)に1行残す */
+  note?(line: string): void;
   on(event: string, cb: Handler): () => void;
 }
 

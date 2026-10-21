@@ -59,3 +59,14 @@ comparisonMarkdown([reportA, reportB], /* onlyDiffs */ true); // 機種比較の
 - **ハンドシェイクで送るのは `capabilities()` のみ。** 診断レポート全体は相手へ送らない。外へ出るのは、利用者が診断画面で共有したときと、adb pull したときだけ。
 - `CapabilityPort` の任意メソッド: `diagnostics()`(網羅採取)、`saveFile(name, text)`(アプリ専用領域へ保存し、パスを返す)。
 - 診断画面: `src/DiagnosticsPanel.tsx`(tether の `App.tsx` に組み込み済み。文字つきボタンのみ)。比較: `npm run diag:compare -- <フォルダ> [--diff]`。
+
+## Direct 稼働中の Nearby と総合状態(`TetherConfig.nearbyWhileDirect`)
+
+詳細・状態遷移図・閾値・クラス設計は [LINK_STATE.md](LINK_STATE.md)。
+
+- `TetherConfig.nearbyWhileDirect: 'keep' | 'suspend'`(既定 `'keep'`)。`'suspend'` は Direct が張れている間 Nearby の広告・探索・接続を止め、Direct が切れたときだけ再開する。両端末で同じ値にする。`directGuard`(echoMs / directMs / nearbyMs / hbIntervalMs / tickMs)・`directRetry`(attempts / backoffMs / joinTimeoutMs / attemptMs)で時間を変えられる。
+- `TetherState.nearby`: `'up' | 'down' | 'suspended'`(`suspended` は意図した停止で異常ではない)。
+- `TetherState.overall`: `'connected' | 'degraded' | 'disconnected'`。**データ経路だけ**から導く(Nearby の link には依存しない)。`Tether.onOverall(cb)` で変化を購読できる。
+- `TetherState.data`: `{ group, echoAt, heartbeat, okAt, reach }`(親機: グループの有無・子機のエコー最終受付 / 子機: Wi-Fi 参加・ハートビート・到達確認)。
+- 既存の購読者への影響なし(フィールド追加のみ)。`link` は Nearby の状態のまま(suspend 中は `'waiting'`)なので、接続表示には `overall` を使う。
+- `send()` は Direct 稼働中は溜まる(`pending`)。Nearby 再開後に届く。Direct 上の制御バスは別 PR(`src/link/transport.ts` の `ControlTransport` に差す)。

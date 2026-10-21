@@ -5,6 +5,10 @@ type Events = {
   log(e: { tag: string; line: string }): void;
   onHotspotStopped(e: Record<string, never>): void;
   onWifiLost(e: Record<string, never>): void;
+  /** 親機: Direct グループの変化。up=false はグループ消滅(appInitiated=true はアプリ自身が閉じたもの)。clients は参加中の子機の数 */
+  onDirectGroup(e: { up: boolean; clients: number; appInitiated: boolean }): void;
+  /** 親機: エコー(9000)に子機が接続してきた(子機のハートビート) */
+  onEchoAccept(e: Record<string, never>): void;
   /** 子機の Wi-Fi 参加。phase 'show' = 端末の許可画面が出る(「接続」を押してもらう)。ok/declined/timeout/cancelled = 終わり */
   onJoinPrompt(e: { ssid: string; phase: 'show' | 'ok' | 'declined' | 'timeout' | 'cancelled'; timeoutMs?: number }): void;
 };
@@ -45,7 +49,7 @@ declare class HotspotModule extends NativeModule<Events> {
   socksSelfTest(port: number, user: string, pass: string): Promise<{ ok: boolean; line?: string; error?: string; udp?: boolean }>;
   startEcho(port: number): void;
   stopEcho(): void;
-  joinWifi(ssid: string, pass: string): Promise<{ gateway: string; reused?: boolean }>;
+  joinWifi(ssid: string, pass: string, timeoutMs?: number | null): Promise<{ gateway: string; reused?: boolean }>;
   leaveWifi(): void;
   /** セルラー回線(INTERNET 能力つき)があるか */
   /** 今つないでいる Wi-Fi の周波数(MHz)。未接続は 0 */

@@ -67,3 +67,45 @@ test('send: ttl 0 は溜めない / key は最新だけ残す / 期限切れは�
     sup.stop();
   }
 });
+
+test('pause 中は接続も探索もせず、resume で再接続する。溜めたメッセージは再送される', async () => {
+  let made = 0;
+  const ts: FakeTransport[] = [];
+  const sup = new LinkSupervisor(() => { made++; const t = new FakeTransport(false, true); ts.push(t); return t; }, () => {}, { sleep: () => tick(), pingTimeoutMs: 100000 });
+  const states: string[] = [];
+  sup.onState = (s) => states.push(s);
+  const run = sup.run();
+  await tick();
+  assert.equal(made, 1);
+  await sup.pause(100);
+  await tick(); await tick();
+  assert.equal(sup.isPaused, true);
+  assert.equal(made, 1); // 新しい transport(= Nearby の接続・探索)を作らない
+  assert.ok(states.includes('paused'));
+  sup.send('while-paused');
+  assert.equal(sup.pending, 1);
+  sup.resume();
+  await tick(); await tick(); await tick();
+  assert.equal(made, 2);
+  assert.equal(sup.pending, 0);
+  sup.stop();
+  await run;
+});
+
+test('接続試行中の pause は試行を打ち切る(Nearby の接続要求を残さない)', async () => {
+  let closed = 0;
+  class Hang extends FakeTransport {
+    async connect() { await new Promise(() => {}); }
+    close() { closed++; }
+  }
+  let made = 0;
+  const sup = new LinkSupervisor(() => { made++; return new Hang(); }, () => {}, { sleep: () => tick() });
+  const run = sup.run();
+  await tick();
+  await sup.pause();
+  await tick();
+  assert.ok(closed >= 1);
+  assert.equal(made, 1);
+  sup.stop();
+  await run;
+});
