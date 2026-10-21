@@ -1491,6 +1491,7 @@ export class Tether {
         }
       }
       last = t;
+      const aliveBefore = this.gov.lastAliveAt;
       this.syncBus(gen);
       this.syncInternet(gen);
       this.bus?.sweep(); // 溜めたままの期限切れ(アプリのメッセージ)を捨てて記録する
@@ -1498,7 +1499,10 @@ export class Tether {
       const before = this.state.overall;
       this.deriveState();
       this.logResumeEta();
+      // 生存信号(バスの aliveAt 等)だけが進んだ tick でも購読者へ知らせる。overall が変わらないと set() が呼ばれず、
+      // 画面が持つ snapshot / state.data の lastAliveAt が古いままになり「生存確認」が NG に見えるため
       if (this.state.overall !== before) this.set({});
+      else if (this.gov.lastAliveAt !== aliveBefore) { this.notify(); this.gov.notify(); }
     }
   }
 

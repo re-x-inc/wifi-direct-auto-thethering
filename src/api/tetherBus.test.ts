@@ -339,3 +339,20 @@ test('restartLink: 子機は governor の表どおり retrying へ(lost manual)�
   await until(() => c.guestT.linkSnapshot().state.name === 'direct-active', 5000, 'guest back to direct');
   c.cleanup();
 });
+
+test('バスの生存信号だけが進んでも、onLink / subscribe の購読者へ新しい lastAliveAt が届く(画面が古い時刻を持たない)', async () => {
+  const c = await setup();
+  await established(c);
+  await until(() => c.bus!.isUp());
+  c.stopEcho();
+  await wait(100); // 遷移・Echo 停止の余波を落ち着かせる
+  const a0 = c.hostT.linkSnapshot().path.lastAliveAt as number;
+  const links: number[] = [];
+  const states: Array<number | null> = [];
+  const off1 = c.hostT.onLink((s) => { if (s.path.lastAliveAt) links.push(s.path.lastAliveAt); });
+  const off2 = c.hostT.subscribe((s) => states.push(s.data.aliveAt));
+  await until(() => links.some((x) => x > a0 + 50), 1500, 'onLink で新しい lastAliveAt');
+  await until(() => states.some((x) => (x ?? 0) > a0 + 50), 1500, 'subscribe で新しい aliveAt');
+  off1(); off2();
+  c.cleanup();
+});
