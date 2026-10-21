@@ -11,6 +11,8 @@ type Events = {
   onEchoAccept(e: Record<string, never>): void;
   /** 子機: ネイティブのハートビートの結果が出た(成功・失敗のたび。JS が起きている間だけ届く) */
   onHeartbeat(e: HeartbeatStatus): void;
+  /** 子機: 外形監視の供給元の 1 周が終わった(成功・失敗のたび。JS が起きている間だけ届く) */
+  onExternalProbe(e: ExternalProbeStatus): void;
   /** 制御バス(Direct 上の ZeroMQ)の認証完了/切断 */
   onBusState(e: { up: boolean; reason: string }): void;
   /** 制御バスのメッセージ(認証済みのものだけ) */
@@ -29,6 +31,32 @@ export interface HeartbeatStatus {
   consecutiveFailures: number;
   attempts: number;
   intervalMs: number;
+}
+
+export interface ExternalProbeStatus {
+  running: boolean;
+  attempts: number;
+  lastAttemptAt: number;
+  lastOkAt: number;
+  lastFailAt: number;
+  lastReason: string | null;
+  lastRttMs: number;
+  lastHttp: number;
+  consecutiveFailures: number;
+}
+
+export interface ExternalProbeOptions {
+  socksHost: string;
+  socksPort: number;
+  user: string;
+  pass: string;
+  urls: string[];
+  intervalMs: number;
+  screenOffIntervalMs: number;
+  confirmIntervalMs: number;
+  timeoutMs: number;
+  failThreshold: number;
+  wakeLock: boolean;
 }
 
 export interface NativeCapabilities {
@@ -80,6 +108,10 @@ declare class HotspotModule extends NativeModule<Events> {
   heartbeatStart(host: string, port: number, intervalMs: number, timeoutMs: number, screenOffIntervalMs: number, wakeLock: boolean): void;
   heartbeatStop(): void;
   heartbeatStatus(): HeartbeatStatus;
+  /** 子機: 外形監視の供給元。親機の中継へ参加した Wi-Fi で直接つなぎ、generate_204 を確かめる。始めたらすぐ 1 周実行する */
+  externalProbeStart(o: ExternalProbeOptions): void;
+  externalProbeStop(): void;
+  externalProbeStatus(): ExternalProbeStatus;
   /** 制御バスを始める(host=親機: Direct のインターフェースで待ち受け / 子機: addr の親機へつなぎ続ける)。戻り値は bind 先 */
   busStart(host: boolean, selfId: string, peerId: string, keyHex: string, addr: string | null, port: number, pingMs: number, timeoutMs: number): string;
   busStop(): void;

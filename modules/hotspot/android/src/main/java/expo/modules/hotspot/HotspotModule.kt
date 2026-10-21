@@ -54,6 +54,7 @@ class HotspotModule : Module() {
   private var joinedGw: String? = null
   private var echo: ServerSocket? = null
   private val heartbeat = Heartbeat({ joined }) { st -> sendEvent("onHeartbeat", st) }
+  private val externalProbe = ExternalProbe({ joined }) { st -> sendEvent("onExternalProbe", st) }
   private var socks: SocksServer? = null
   private var socksRef: SocksServer? = null
   private var cellular: Network? = null
@@ -78,9 +79,9 @@ class HotspotModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("Hotspot")
-    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "onDirectGroup", "onEchoAccept", "onHeartbeat", "onBusState", "onBusMessage", "log")
+    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "onDirectGroup", "onEchoAccept", "onHeartbeat", "onExternalProbe", "onBusState", "onBusMessage", "log")
     OnCreate { DhLog.sink = { tag, line -> sendEvent("log", mapOf("tag" to tag, "line" to line)) } }
-    OnDestroy { heartbeat.stop("module destroy"); DhLog.sink = null }
+    OnDestroy { heartbeat.stop("module destroy"); externalProbe.stop("module destroy"); DhLog.sink = null }
 
     // ---- 親機 ----
     AsyncFunction("startHotspot") { promise: Promise ->
@@ -435,6 +436,22 @@ class HotspotModule : Module() {
     }
     Function("heartbeatStop") { heartbeat.stop("JS") }
     Function("heartbeatStatus") { heartbeat.status() }
+
+    /**
+     * 子機: 外形監視の供給元(ExternalProbe)。親機の中継(SOCKS5)へ、参加した Wi-Fi の Network で直接つなぎ、generate_204 を確かめる。
+     * 始めたらすぐ 1 周実行する。結果は externalProbeStatus で読み、onExternalProbe でも届く。tether のコアは src/api/internetProbe.ts 経由で使う。
+     */
+    Function("externalProbeStart") { o: Map<String, Any?> ->
+      externalProbe.start(ctx, ExternalProbe.Config(
+        socksHost = o["socksHost"] as String, socksPort = (o["socksPort"] as Number).toInt(), user = o["user"] as String, pass = o["pass"] as String,
+        urls = (o["urls"] as List<*>).map { it.toString() },
+        intervalMs = (o["intervalMs"] as Number).toLong(), screenOffIntervalMs = (o["screenOffIntervalMs"] as Number).toLong(),
+        confirmIntervalMs = (o["confirmIntervalMs"] as Number).toLong(), timeoutMs = (o["timeoutMs"] as Number).toLong(),
+        failThreshold = (o["failThreshold"] as Number).toInt(), wakeLock = o["wakeLock"] as? Boolean ?: true,
+      ))
+    }
+    Function("externalProbeStop") { externalProbe.stop("JS") }
+    Function("externalProbeStatus") { externalProbe.status() }
 
     /** 参加した Wi-Fi 経由で host:port へ TCP 接続し、"ping" を送って往復時間(ms)を返す。 */
     AsyncFunction("probe") { host: String, port: Int, promise: Promise ->
