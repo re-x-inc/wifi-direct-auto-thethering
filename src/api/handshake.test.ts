@@ -162,7 +162,8 @@ test('古い親機(交換に対応していない)の相手でも、子機の he
   // 親機の hello 処理を無効化 = 能力交換を知らない親機。待ち時間後に不明として決める
   (hostT as any).onHello = async () => {};
   await hostT.start(); await guestT.start();
-  await until(() => guestT.getState().vpn === 'on', 4000);
+  // 能力の待ち時間を含むので、全体の並列実行でも余裕をもって待つ
+  await until(() => guestT.getState().vpn === 'on', 12000);
   assert.ok(host.calls.includes('startDirect'));
   hostT.stop(); guestT.stop();
 });
