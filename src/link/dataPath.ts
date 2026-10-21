@@ -26,9 +26,18 @@ export interface DataPath {
    * どちらか新しい方を生存とする(lastAliveAt)。バスが無い・旧版の相手のときは null
    */
   busAt: number | null;
+  /**
+   * 「最後に Direct の生存を確認した時刻」。**LinkGovernor が保持**する(送り手 = Echo・バス・ZMTP heartbeat に依存しない。
+   * noteAliveAt の入口で max を取り、古い時刻へは戻さない)。画面・判定はこの値だけを読む。まだ無ければ null
+   */
+  aliveAt: number | null;
+  /** Direct 上のバスの状態。authenticated = 認証済みで接続中 / disconnected = 動いているが切れている / off = 使っていない */
+  bus: BusLinkState;
 }
 
-export const initialDataPath = (): DataPath => ({ group: null, echoAt: null, heartbeat: null, okAt: null, reach: null, busAt: null });
+export type BusLinkState = 'off' | 'disconnected' | 'authenticated';
+
+export const initialDataPath = (): DataPath => ({ group: null, echoAt: null, heartbeat: null, okAt: null, reach: null, busAt: null, aliveAt: null, bus: 'off' });
 
 const maxAt = (a: number | null | undefined, b: number | null | undefined): number | null =>
   a == null ? (b ?? null) : b == null ? a : Math.max(a, b);
@@ -40,7 +49,7 @@ const maxAt = (a: number | null | undefined, b: number | null | undefined): numb
  */
 export function lastAliveAt(d: DataPath, role: 'host' | 'guest'): number | null {
   const echo = role === 'host' ? d.echoAt : (d.okAt ?? (d.heartbeat?.ok ? d.heartbeat.at : null));
-  return maxAt(echo, d.busAt);
+  return maxAt(maxAt(echo, d.busAt), d.aliveAt);
 }
 
 export interface OverallInput {
@@ -89,11 +98,11 @@ export function deriveOverall(i: OverallInput): Overall {
   }
   if (!i.wifiJoined || d.group === false) return 'disconnected';
   if (!i.vpnOn || d.reach?.ok === false) return 'degraded';
-  if (i.heartbeatMode && (d.heartbeat || d.busAt !== null)) {
-    const age = i.now - (maxAt(d.okAt ?? d.heartbeat?.at ?? null, d.busAt) as number);
+  if (i.heartbeatMode && (d.heartbeat || d.busAt !== null || d.aliveAt !== null)) {
+    const age = i.now - (lastAliveAt(d, 'guest') as number);
     if (age >= i.directMs) return 'disconnected';
     // 直近の Echo 失敗でも、それより新しいバスの生存信号があれば異常とはしない
-    const echoBad = !!d.heartbeat && !d.heartbeat.ok && !(d.busAt !== null && d.busAt >= d.heartbeat.at);
+    const echoBad = !!d.heartbeat && !d.heartbeat.ok && !(maxAt(d.busAt, d.aliveAt) !== null && (maxAt(d.busAt, d.aliveAt) as number) >= d.heartbeat.at);
     if (echoBad || age >= i.echoMs) return 'degraded';
   }
   return 'connected';

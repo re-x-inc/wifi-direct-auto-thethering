@@ -213,3 +213,69 @@ test('Echo が一度も届かなくても、バスが認証済みなら親機は
   assert.equal(c.hostT.getState().data.echoAt, null);
   c.cleanup();
 });
+
+test('linkSnapshot に lastAliveAt と bus(authenticated / disconnected)が出る。バス断でも lastAliveAt は戻らない', async () => {
+  const c = await setup();
+  await established(c);
+  await until(() => c.bus!.isUp());
+  await until(() => c.guestT.linkSnapshot().path.bus === 'authenticated' && c.hostT.linkSnapshot().path.bus === 'authenticated', 1000, 'bus authenticated');
+  await until(() => (c.guestT.linkSnapshot().path.lastAliveAt ?? 0) > 0, 1000, 'lastAliveAt');
+  const s1 = c.guestT.linkSnapshot();
+  assert.equal(s1.data?.bus, 'authenticated');
+  assert.equal(s1.data?.aliveAt, s1.path.lastAliveAt);
+  assert.equal(c.guestT.getState().data.aliveAt, s1.path.lastAliveAt);
+  c.stopPulse(); c.stopEcho();
+  c.bus!.link(false);
+  await until(() => c.guestT.linkSnapshot().path.bus === 'disconnected', 1000, 'bus disconnected');
+  const frozen = c.guestT.linkSnapshot().path.lastAliveAt as number;
+  assert.ok(frozen >= (s1.path.lastAliveAt as number), '古い時刻へ戻らない');
+  await wait(60);
+  assert.equal(c.guestT.linkSnapshot().path.lastAliveAt, frozen, '切断中は進まない');
+  c.cleanup();
+});
+
+test('ヒステリシス: バスが短く切れて戻っても、ネイティブ Echo を start/stop し直さない', async () => {
+  const c = await setup(SUSPEND, true, SUSPEND, true);
+  const timer = setInterval(() => {
+    const hb = c.guest.ctl.hb;
+    if (!hb.running) return;
+    const now = Date.now(); hb.lastAttemptAt = now; hb.lastOkAt = now; hb.consecutiveFailures = 0; c.host.emitEcho();
+  }, 10);
+  await established(c);
+  await until(() => c.bus!.isUp());
+  await wait(100);
+  const starts0 = c.guest.calls.filter((x) => x.startsWith('hbStart:')).length;
+  const stops0 = c.guest.calls.filter((x) => x.startsWith('hbStop')).length;
+  c.bus!.link(false);
+  await wait(8); // grace(hb×2 = 40ms)より短い
+  c.bus!.link(true);
+  await wait(120);
+  assert.equal(c.guest.calls.filter((x) => x.startsWith('hbStart:')).length, starts0, 'Echo を始め直していない');
+  assert.equal(c.guest.calls.filter((x) => x.startsWith('hbStop')).length, stops0);
+  clearInterval(timer);
+  c.cleanup();
+});
+
+test('restartLink: 親機は Direct を作り直し、二重起動せず、停止中は何もしない', async () => {
+  const c = await setup();
+  assert.deepEqual(await c.hostT.restartLink(), { action: 'none', reason: 'stopped' });
+  await established(c);
+  await until(() => c.bus!.isUp());
+  const r = await c.hostT.restartLink();
+  assert.equal(r.action, 'rebuild');
+  assert.deepEqual(await c.hostT.restartLink().then((x) => x.action), 'none', '再接続中は何もしない');
+  await until(() => c.hostT.getState().overall === 'connected' && c.hostT.getState().nearby === 'suspended', 5000, 'back to direct');
+  c.cleanup();
+});
+
+test('restartLink: 子機は governor の表どおり retrying へ(lost manual)。戻れば direct に戻る', async () => {
+  const c = await setup();
+  await established(c);
+  await until(() => c.bus!.isUp());
+  const r = await c.guestT.restartLink();
+  assert.equal(r.action, 'retry');
+  assert.ok(c.guestT.linkSnapshot().history.some((h) => h.to === 'retrying' && h.reason === 'manual'));
+  assert.equal((await c.guestT.restartLink()).action, 'none');
+  await until(() => c.guestT.linkSnapshot().state.name === 'direct-active', 5000, 'guest back to direct');
+  c.cleanup();
+});

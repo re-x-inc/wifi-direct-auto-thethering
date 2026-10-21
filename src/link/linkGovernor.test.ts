@@ -103,3 +103,33 @@ test('I6: joinWifi はどの phase でも許す（Nearby 接続中の初回参�
   assert.equal(c.g.violations.length, 0);
   assert.ok(c.logs.some((l) => l.includes('joinWifi（I6: 許可）phase=retrying')));
 });
+
+test('noteAliveAt: 生存信号の最終時刻は governor が保持(max。古い時刻へ戻さない・遅れて届いても添えられた時刻で更新)', () => {
+  const c = make(true);
+  c.at(1000);
+  assert.equal(c.g.lastAliveAt, null);
+  assert.equal(c.g.noteAliveAt(900), true);
+  assert.equal(c.g.lastAliveAt, 900);
+  assert.equal(c.g.noteAliveAt(800), false, '古い時刻は無視');
+  assert.equal(c.g.lastAliveAt, 900);
+  // JS が止まっていた(now が進んだ)あとに、止まっていた間のイベントが遅れて届く: now ではなく添えられた時刻
+  c.at(9000);
+  assert.equal(c.g.noteAliveAt(4000), true);
+  assert.equal(c.g.lastAliveAt, 4000);
+  assert.equal(c.g.noteAliveAt(99999), true, '未来の時刻は now に丸める');
+  assert.equal(c.g.lastAliveAt, 9000);
+  assert.equal(c.g.snapshot().path.lastAliveAt, 9000);
+  c.g.forgetAlive();
+  assert.equal(c.g.lastAliveAt, null);
+});
+
+test('noteAliveAt: direct 中は T_echo の基準(guard.aliveAt)も進む。Echo・バス・ZMTP のどこから来ても同じ入口', () => {
+  const c = make(true);
+  c.at(0); c.g.dispatch({ t: 'ready' });
+  c.at(100); c.g.dispatch({ t: 'tick' }); // direct
+  c.at(500);
+  c.g.noteAliveAt(450);
+  assert.equal(c.g.state.aliveAt, 450);
+  c.g.noteAliveAt(300);
+  assert.equal(c.g.state.aliveAt, 450);
+});

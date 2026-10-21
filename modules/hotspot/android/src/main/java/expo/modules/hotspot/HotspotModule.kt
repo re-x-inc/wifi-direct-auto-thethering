@@ -312,7 +312,7 @@ class HotspotModule : Module() {
     /** JS が止まっていても、ネイティブが更新し続けた生存信号の最終時刻(epoch ms。0 = まだ無い) */
     Function("busStatus") {
       val b = activeBus
-      mapOf("running" to (b != null), "up" to (b?.up ?: false), "lastRxAt" to (b?.lastRxAt ?: 0L), "connects" to (b?.connects ?: 0), "lastError" to b?.lastError)
+      mapOf("running" to (b != null), "up" to (b?.up ?: false), "lastRxAt" to (b?.lastRxAt ?: 0L), "aliveAt" to (b?.aliveAt ?: 0L), "disconnectedAt" to (b?.disconnectedAt ?: 0L), "connections" to (b?.connections ?: 0), "disconnects" to (b?.disconnects ?: 0), "connects" to (b?.connects ?: 0), "lastError" to b?.lastError)
     }
 
     // ---- 子機 ----

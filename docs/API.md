@@ -68,10 +68,15 @@ comparisonMarkdown([reportA, reportB], /* onlyDiffs */ true); // 機種比較の
 - `TetherState.nearby`: `'up' | 'down' | 'suspended'`(`suspended` は意図した停止で異常ではない)。
 - `TetherState.overall`: `'connected' | 'degraded' | 'disconnected'`。**データ経路だけ**から導く(Nearby の link には依存しない)。`Tether.onOverall(cb)` で変化を購読できる。
 - `TetherConfig.hbScreenOffIntervalMs`(省略=延ばさない)/ `hbWakeLock`(既定 true): 子機のハートビートはネイティブ(Hotspot モジュールの専用スレッド)で続き、JS が止まっても送る。画面オフ中だけ間隔を延ばす値(T_echo の半分まで)と、動作中 PARTIAL_WAKE_LOCK を持つかの指定。ネイティブ側が無い部品では従来の JS ループで動く。ログのタグ: `DH-HB`(logcat)、`[DH-LINK] ネイティブのハートビート…`。
-- `TetherState.data`: `{ group, echoAt, heartbeat, okAt, reach }`(親機: グループの有無・子機のエコー最終受付 / 子機: Wi-Fi 参加・ハートビート・到達確認)。
+- `TetherState.data`: `{ group, echoAt, heartbeat, okAt, reach, busAt, aliveAt, bus }`(`aliveAt` = 最後に Direct の生存を確認した時刻(LinkGovernor が保持。Echo・バス・ZMTP heartbeat のどれから来ても同じ)/ `bus` = `'authenticated' | 'disconnected' | 'off'`。親機: グループの有無・子機のエコー最終受付 / 子機: Wi-Fi 参加・ハートビート・到達確認)。
 - 既存の購読者への影響なし(フィールド追加のみ)。`link` は Nearby の状態のまま(suspend 中は `'waiting'`)なので、接続表示には `overall` を使う。
 - `send()` は Direct 稼働中は溜まる(`pending`)。Nearby 再開後に届く。Direct 上の制御バスは別 PR(`src/link/transport.ts` の `ControlTransport` に差す)。
 
 ## Direct 稼働中のメッセージ(バス)
 
 `tether.send()` / `onMessage()` は、Direct 稼働中(Nearby を止めている間)は Direct 上のバスで、それ以外は Nearby で運ばれる。呼び出し側の API は変わらない。切断中は溜めて再接続後に送信順で再送(ttl・key も同じ意味)。受け手には at-least-once のうち重複を除いて 1 回だけ渡る。詳細は [GATEWAY_BUS.md](GATEWAY_BUS.md) §11 / [LINK_STATE.md](LINK_STATE.md)。
+
+## 生存確認(ZMTP heartbeat)と再接続 API
+- `tether.linkSnapshot()`(`onLink`)に **`path.lastAliveAt`**(最後に生存を確認した時刻 epoch ms / 無ければ null)・**`path.bus`**(`authenticated` / `disconnected` / `off`)・`data`(`TetherState.data` と同じ)を追加(追加のみ。mobile は feature-detect で読む)。`TetherState.data.aliveAt` / `.bus` も同じ値。
+- `TetherConfig.timing.busIvlMs`(既定 2000)/ `busTimeoutMs`(既定 6000): バスの ZMTP heartbeat(`ZMQ_HEARTBEAT_IVL` / `TIMEOUT`=`TTL`)。TIMEOUT + IVL < `echoMs`(15s)にする。詳細は GATEWAY_BUS.md §12。
+- **`tether.restartLink(): Promise<{ action: 'rebuild' | 'retry' | 'share' | 'none'; reason?: string }>`**: 再接続専用。LinkGovernor の遷移表に沿って Direct の作り直しと Nearby 復帰の再試行を始める(`shareNow()` の代用をやめる用)。親機は Wi-Fi Direct 共有中なら Direct を作り直す(`rebuild`)、共有していなければ `shareNow()`(`share`)。子機は Direct 稼働中(phase=direct)なら `lost('manual')` で retrying へ(`retry`。尽きれば表どおり Nearby を再開)。すでに再接続中(retrying / rejoining)・停止中は何もしない(`none`)。

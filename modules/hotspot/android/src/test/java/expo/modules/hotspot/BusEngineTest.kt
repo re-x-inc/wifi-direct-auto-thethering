@@ -39,9 +39,10 @@ class BusEngineTest {
       assertTrue("both up", until { h.e.up && g.e.up })
       assertTrue(g.e.send("hello-from-guest")); assertTrue(h.e.send("hello-from-host"))
       assertTrue(until { h.msgs.contains("hello-from-guest") && g.msgs.contains("hello-from-host") })
-      // ping/pong が lastRxAt を進める(メッセージを送らなくても)
-      val t0 = h.e.lastRxAt
-      assertTrue("lastRxAt advances by ping", until { h.e.lastRxAt > t0 + 200 && g.e.lastRxAt > t0 })
+      // メッセージを送らなくても、ZMTP heartbeat の生存イベント(aliveAt)が IVL ごとに進む。アプリ層の ping/pong は無い
+      val t0 = maxOf(h.e.aliveAt, g.e.aliveAt)
+      assertTrue("aliveAt advances without app traffic", until { h.e.aliveAt > t0 + 200 && g.e.aliveAt > t0 + 200 })
+
     } finally { g.e.stop(); h.e.stop() }
   }
 
@@ -79,8 +80,81 @@ class BusEngineTest {
     try {
       assertTrue(until { h.e.up && g.e.up })
       g.e.stop()
-      assertTrue("host sees timeout", until { !h.e.up })
-      assertEquals("down:timeout", h.ups.last())
+      assertTrue("host sees disconnect", until { !h.e.up })
+      assertEquals("down:disconnected", h.ups.last())
+    } finally { g.e.stop(); h.e.stop() }
+  }
+
+  /** 127.0.0.1 上の TCP 中継。blackhole = true で「経路が静かに死ぬ」(Wi-Fi が切れて RST も FIN も来ない)状態にする */
+  private class Proxy(val target: Int) {
+    val ss = ServerSocket(0)
+    @Volatile var blackhole = false
+    val port get() = ss.localPort
+    private val socks = CopyOnWriteArrayList<java.net.Socket>()
+    init {
+      Thread {
+        try {
+          while (true) {
+            val a = ss.accept(); val b = java.net.Socket("127.0.0.1", target)
+            socks.add(a); socks.add(b)
+            pump(a, b); pump(b, a)
+          }
+        } catch (_: Throwable) {}
+      }.apply { isDaemon = true }.start()
+    }
+    private fun pump(from: java.net.Socket, to: java.net.Socket) = Thread {
+      try {
+        val buf = ByteArray(4096); val i = from.getInputStream(); val o = to.getOutputStream()
+        while (true) { val n = i.read(buf); if (n < 0) break; if (!blackhole) { o.write(buf, 0, n); o.flush() } }
+      } catch (_: Throwable) {}
+    }.apply { isDaemon = true }.start()
+    /** 既存の TCP を全部切る(Wi-Fi に入り直すと新しい TCP になる) */
+    fun dropAll() { socks.forEach { try { it.close() } catch (_: Throwable) {} }; socks.clear() }
+    fun close() { try { ss.close() } catch (_: Throwable) {}; socks.forEach { try { it.close() } catch (_: Throwable) {} } }
+  }
+
+  @Test fun silentPathDeathIsDetectedByHeartbeatTimeoutAndAliveStops() {
+    val hp = freePort()
+    val h = make(true, hp, ping = 100, timeout = 600)
+    val px = Proxy(hp)
+    val g = make(false, px.port, ping = 100, timeout = 600)
+    h.e.start(); g.e.start()
+    try {
+      assertTrue(until { h.e.up && g.e.up })
+      val a0 = g.e.aliveAt
+      assertTrue(until { g.e.aliveAt > a0 + 200 })
+      px.blackhole = true // 以後どちらにも何も届かない(切断通知も無い)
+      val t0 = System.currentTimeMillis()
+      // ZMTP heartbeat の DISCONNECTED、または保険の P/O の timeout(jeromq 0.6.0 は前者が出ないことがある)のどちらかで切れる
+      assertTrue("guest: down", until { !g.e.up })
+      assertTrue("host: same", until { !h.e.up })
+      val took = System.currentTimeMillis() - t0
+      assertTrue("detected within timeout + ping + slack (took $took ms)", took < 600 + 100 + 1500)
+      assertTrue(g.ups.last() in listOf("down:disconnected", "down:timeout"))
+      assertTrue(h.ups.last() in listOf("down:disconnected", "down:timeout"))
+      // 切断中は生存イベントが進まない
+      val frozen = g.e.aliveAt
+      Thread.sleep(500)
+      assertEquals(frozen, g.e.aliveAt)
+      assertTrue("aliveAt stopped no later than detection", frozen <= System.currentTimeMillis() - 0)
+      // 経路が戻れば再接続して認証し、生存イベントが再開する
+      px.dropAll(); px.blackhole = false // 経路が戻る = 古い TCP は捨てられ、新しい TCP でつながり直す
+      assertTrue("recovers", until(10000) { g.e.up && h.e.up })
+      assertTrue(until { g.e.aliveAt > frozen + 200 })
+    } finally { g.e.stop(); h.e.stop(); px.close() }
+  }
+
+  @Test fun guestStopDoesNotLeaveHostAlive() {
+    val port = freePort()
+    val h = make(true, port); val g = make(false, port)
+    h.e.start(); g.e.start()
+    try {
+      assertTrue(until { h.e.up && g.e.up })
+      g.e.stop()
+      assertTrue(until { !h.e.up })
+      val frozen = h.e.aliveAt
+      Thread.sleep(400)
+      assertEquals("host aliveAt frozen after peer gone", frozen, h.e.aliveAt)
     } finally { g.e.stop(); h.e.stop() }
   }
 }

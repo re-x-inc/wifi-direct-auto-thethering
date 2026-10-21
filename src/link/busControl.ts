@@ -15,7 +15,9 @@ export interface BusStartOptions {
   /** 子機: 親機のアドレス。親機: null(Direct のインターフェースを探して bind する) */
   addr: string | null;
   port: number;
+  /** ZMQ_HEARTBEAT_IVL(ms)。ZMTP heartbeat の PING の間隔。アプリ層の保険の P の間隔でもある */
   pingMs: number;
+  /** ZMQ_HEARTBEAT_TIMEOUT / TTL(ms)。この間 PONG が無ければ jeromq が接続を閉じる */
   timeoutMs: number;
 }
 
@@ -24,6 +26,17 @@ export interface BusStatus {
   up: boolean;
   /** 最後に認証済みのフレーム(ping/pong 含む)を受けた時刻(epoch ms、0 = まだ無い)。ネイティブが更新し続ける生存信号 */
   lastRxAt: number;
+  /**
+   * 直近の「生きている」イベントの時刻(epoch ms、0 = まだ無い)。ZMTP heartbeat + socket monitor(接続中で切断イベントが無い)と、
+   * 保険のアプリ層 P/O から、ネイティブが IVL ごとに進める。**時刻の保持は LinkGovernor**(JS はこれを noteAliveAt に渡すだけ)。
+   * 旧版のネイティブには無い(その場合は lastRxAt を使う)
+   */
+  aliveAt?: number;
+  /** 直近の切断イベントの時刻(0 = まだ無い) */
+  disconnectedAt?: number;
+  /** monitor が数えた TCP 接続の数 / 切断イベントの数(診断用) */
+  connections?: number;
+  disconnects?: number;
   connects: number;
   lastError: string | null;
 }

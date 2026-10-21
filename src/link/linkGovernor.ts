@@ -32,7 +32,13 @@ export interface LinkSnapshot {
   state: LinkStateInfo;
   overall: Overall;
   /** データ経路の内訳 */
-  path: { nearby: NearbyPhase; group: boolean | null; echoAt: number | null; reach: DataPath['reach']; heartbeat: DataPath['heartbeat'] };
+  path: { nearby: NearbyPhase; group: boolean | null; echoAt: number | null; reach: DataPath['reach']; heartbeat: DataPath['heartbeat'];
+    /** 最後に Direct の生存を確認した時刻(LinkGovernor が保持。無ければ null) */
+    lastAliveAt: number | null;
+    /** Direct 上のバス: authenticated / disconnected / off(使っていない) */
+    bus: DataPath['bus'] };
+  /** データ経路の内訳(state.data と同じ値。lastAliveAt / bus を含む) */
+  data: DataPath | null;
   /** 直近の遷移（古い順、最大 HISTORY_MAX 件）。秘密・SSID・パスは含まない */
   history: Transition[];
   timing: unknown;
@@ -83,6 +89,8 @@ export class LinkGovernor {
   private nearbyStopped = false;
   /** rebuild 手順中(接続情報を送った → Nearby を閉じる → グループ作成) */
   private rebuilding = false;
+  /** 生存信号の最終時刻(max。古い時刻へは戻さない)。0 = まだ無い。送り手に依存しない */
+  private aliveMax = 0;
   readonly violations: string[] = [];
   private hist: Transition[] = [];
   private subs = new Set<(s: LinkSnapshot) => void>();
@@ -98,6 +106,7 @@ export class LinkGovernor {
 
   /** 事象を入れる。遷移は stepGuard の表どおり(表に無い事象は状態を変えない) */
   dispatch(ev: GuardEvent): void {
+    if (ev.t === 'reset') this.aliveMax = 0;
     const prev = this.s;
     const [next, acts] = stepGuard(prev, ev, this.o.now(), this.o.timing);
     this.s = next;
@@ -131,6 +140,25 @@ export class LinkGovernor {
   /** JS が止まっていた(Doze)あとの数え直し: direct 中なら生存確認の時刻を今にする */
   grace(): void {
     if (this.s.phase === 'direct') this.s = { ...this.s, aliveAt: this.o.now() };
+  }
+
+  /** 新しい Direct のセッションに入った: 生存信号の最終時刻を忘れる(前のセッションの時刻を持ち越さない) */
+  forgetAlive(): void { this.aliveMax = 0; }
+
+  /** 最後に生存を確認した時刻。まだ無ければ null */
+  get lastAliveAt(): number | null { return this.aliveMax || null; }
+
+  /**
+   * 生存信号の時刻を受け取る**唯一の入口**。送り手(Echo・バス・ZMTP heartbeat)は問わない。
+   * 時刻はイベントが起きた時刻(ネイティブが添える)なので、JS が止まっていて遅れて届いても、その時刻で更新する。
+   * 未来の時刻は now に丸め、古い時刻(いまの値以下)は無視する。戻り値 = 進んだか
+   */
+  noteAliveAt(at: number): boolean {
+    const t = Math.min(at, this.o.now());
+    if (!Number.isFinite(t) || t <= this.aliveMax) return false;
+    this.aliveMax = t;
+    if (this.s.phase === 'direct') this.s = { ...this.s, aliveAt: Math.max(this.s.aliveAt, t) };
+    return true;
   }
 
   /** ネイティブのハートビートが最後に成功した時刻(JS の now 以前)へ、生存確認の基準を合わせる。JS が止まっていた間の時間を無通信に数えない */
@@ -203,7 +231,8 @@ export class LinkGovernor {
     const d = c?.data;
     return {
       state, overall: c?.overall ?? 'disconnected',
-      path: { nearby: c?.nearby ?? 'down', group: d?.group ?? null, echoAt: d?.echoAt ?? null, reach: d?.reach ?? null, heartbeat: d?.heartbeat ?? null },
+      path: { nearby: c?.nearby ?? 'down', group: d?.group ?? null, echoAt: d?.echoAt ?? null, reach: d?.reach ?? null, heartbeat: d?.heartbeat ?? null, lastAliveAt: this.aliveMax || null, bus: d?.bus ?? 'off' },
+      data: d ? { ...d, aliveAt: this.aliveMax || d.aliveAt } : null,
       history: [...this.hist], timing: c?.timing ?? tm, at: now,
     };
   }

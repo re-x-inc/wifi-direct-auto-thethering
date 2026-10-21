@@ -55,3 +55,21 @@ test('親機の戻り(T_direct)≤ 子機の探索開始(T_nearby)が役割別�
   assert.ok(!('tickMs' in shared) && !('joinTimeoutMs' in shared) && !('nearbyRetryMaxMs' in shared));
   assert.equal(shared.nearbyMs, 130_000);
 });
+
+test('バスの ZMTP heartbeat: IVL / TIMEOUT は外から設定でき、既定は IVL=2s・TIMEOUT=6s(T_echo=15s より先に切れを知る)', () => {
+  const d = resolveTiming({});
+  assert.equal(d.busIvlMs, 2_000);
+  assert.equal(d.busTimeoutMs, 6_000);
+  assert.ok(d.busTimeoutMs + d.busIvlMs < d.echoMs);
+  const c = resolveTiming({ busIvlMs: 1_000, busTimeoutMs: 4_000 });
+  assert.equal(c.busIvlMs, 1_000); assert.equal(c.busTimeoutMs, 4_000);
+  const logs: string[] = [];
+  const bad = resolveTiming({ busIvlMs: 3_000, busTimeoutMs: 4_000 }, { log: (l) => logs.push(l) });
+  assert.equal(bad.busTimeoutMs, 6_000, 'TIMEOUT < IVL×2 は IVL×2 に補正');
+  assert.ok(logs.some((l) => l.includes('bus TIMEOUT')));
+  const warn: string[] = [];
+  resolveTiming({ echoMs: 5_000, busTimeoutMs: 6_000 }, { log: (l) => warn.push(l) });
+  assert.ok(warn.some((l) => l.includes('T_echo')));
+  const lo = resolveTiming({ busIvlMs: 10 }, { log: () => {} });
+  assert.equal(lo.busIvlMs, 2_000, '範囲外は既定');
+});

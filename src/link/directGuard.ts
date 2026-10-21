@@ -22,7 +22,7 @@
 
 export type GuardPhase = 'nearby' | 'settling' | 'direct' | 'retrying' | 'rejoining';
 
-export type LostReason = 'wifi-lost' | 'group-gone' | 'no-clients' | 'silence' | 'direct-timeout' | 'retry-exhausted' | 'rejoin-timeout';
+export type LostReason = 'wifi-lost' | 'group-gone' | 'no-clients' | 'silence' | 'direct-timeout' | 'retry-exhausted' | 'rejoin-timeout' | 'manual';
 
 export interface GuardTiming {
   /** Direct が確立したと分かってから Nearby を止めるまでの安定待ち(ms)。この間に切れたら止めない */
@@ -60,7 +60,7 @@ export type GuardEvent =
   /** Direct の生存を確認(ハートビート成功・エコー受付・グループにクライアントがいる) */
   | { t: 'alive' }
   /** 確定した切断(Wi-Fi 切断 / グループ消滅 / 子機が 0 台に) */
-  | { t: 'lost'; reason: 'wifi-lost' | 'group-gone' | 'no-clients' }
+  | { t: 'lost'; reason: 'wifi-lost' | 'group-gone' | 'no-clients' | 'manual' }
   /** 再接続の試行をすべて使い切った(実行側が出す) */
   | { t: 'retry-failed' }
   /** Nearby を閉じてグループを作り直す(Nearby 経由の再接続の手順)。Nearby は止めたまま相手を待つ */
