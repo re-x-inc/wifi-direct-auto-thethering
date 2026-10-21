@@ -161,11 +161,14 @@ test('古い親機(交換に対応していない)の相手でも、子機の he
   const { hostT, guestT, host } = await setup();
   // 親機の hello 処理を無効化 = 能力交換を知らない親機。待ち時間後に不明として決める
   (hostT as any).onHello = async () => {};
-  await hostT.start(); await guestT.start();
-  // 能力の待ち時間を含むので、全体の並列実行でも余裕をもって待つ
-  await until(() => guestT.getState().vpn === 'on', 12000);
-  assert.ok(host.calls.includes('startDirect'));
-  hostT.stop(); guestT.stop();
+  try {
+    await hostT.start(); await guestT.start();
+    // 能力の待ち時間を含むので、全体の並列実行でも余裕をもって待つ
+    await until(() => guestT.getState().vpn === 'on', 12000);
+    assert.ok(host.calls.includes('startDirect'));
+  } finally {
+    hostT.stop(); guestT.stop(); // 失敗しても止める(残ったタイマーで実行が終わらなくなるのを防ぐ)
+  }
 });
 
 test('Direct が続けて失敗した履歴があると、次回は LocalOnlyHotspot を先に試す', async () => {
