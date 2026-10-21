@@ -6,6 +6,8 @@ import { labelOf, LinkStateInfo, LinkStateName, Transition, WaitingFor } from '.
 
 /** 画面表示用に Tether が渡す、状態機械の外側の情報 */
 export interface LinkContext {
+  /** 運び先(Tether が渡す)。省略時は control=nearby・appPending=0 */
+  carriers?: { control: 'nearby' | 'bus'; appPending: number };
   role: 'host' | 'guest' | null;
   started: boolean;
   /** Nearby 部品が suspend() を持つか。false は旧部品の縮退動作(Direct 中も Nearby を止められない) */
@@ -43,6 +45,12 @@ export interface LinkSnapshot {
   history: Transition[];
   timing: unknown;
   at: number;
+  /** 内部制御(tether.* の hello/caps/wifi/plan など)のいまの運び先 */
+  controlCarrier: 'nearby' | 'bus';
+  /** アプリのメッセージ(tether.send)の運び先。常にバス(Nearby には載せない) */
+  appCarrier: 'bus';
+  /** バスに溜まっていて未送達のアプリのメッセージ数 */
+  appPending: number;
 }
 
 const HISTORY_MAX = 50;
@@ -234,6 +242,7 @@ export class LinkGovernor {
       path: { nearby: c?.nearby ?? 'down', group: d?.group ?? null, echoAt: d?.echoAt ?? null, reach: d?.reach ?? null, heartbeat: d?.heartbeat ?? null, lastAliveAt: this.aliveMax || null, bus: d?.bus ?? 'off' },
       data: d ? { ...d, aliveAt: this.aliveMax || d.aliveAt } : null,
       history: [...this.hist], timing: c?.timing ?? tm, at: now,
+      controlCarrier: c?.carriers?.control ?? 'nearby', appCarrier: 'bus', appPending: c?.carriers?.appPending ?? 0,
     };
   }
 

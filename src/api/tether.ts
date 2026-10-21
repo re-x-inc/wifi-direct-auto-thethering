@@ -8,8 +8,9 @@ import { LinkStateInfo } from '../link/stateLabels';
 import { LinkTimingConfig, pickShared, resolveTiming, toGuardTiming, toRetry } from '../link/timingConfig';
 import { LinkContext, LinkGovernor, LinkSnapshot } from '../link/linkGovernor';
 import { NearbyControl } from '../link/transport';
-import { BusControl } from '../link/busControl';
-import { Carrier, RoutedControl } from '../link/controlRouter';
+import { BusControl, NO_BUS_PORT, BusEvent } from '../link/busControl';
+import { kindOf } from '../link/channel';
+import { Carrier, RoutedControl, SendReport } from '../link/controlRouter';
 import type { NearbyApi } from '../link/nearbyTransport';
 import { Confirm, Found, PairingResult, PairingSession } from '../pairing/pairing';
 import { clearDirectCreds } from '../pairing/forget';
@@ -542,16 +543,17 @@ export class Tether {
       this.busSeenUp = false;
       this.bus = null;
       // バスを使うかどうかは運び先の選択(pickCarrier)で決める。ここでは部品があれば作るだけ
+      // バス部品が無い端末でも BusControl は作る(アプリのメッセージの保留・ttl 破棄をここで持つため。部品なしは送れないので溜まって ttl で捨てられるだけ)
+      this.bus = new BusControl(this.p.bus ?? NO_BUS_PORT, { now: this.p.now, onEvent: (e) => this.onBusEvent(e) });
       if (this.p.bus) {
         this.busKey = this.nearby.hmac(pair.secret, BUS_KEY_LABEL);
-        this.bus = new BusControl(this.p.bus, { now: this.p.now });
         this.bus.attach();
         this.offBusUp = this.bus.onUpDown((up, reason) => this.onBusUpDown(gen, role, up, reason));
       }
       const routed = new RoutedControl(ctl, this.bus, () => this.pickCarrier(), (to, moved) => {
-        this.gnote(`制御メッセージの運び先: ${to === 'bus' ? 'バス(Direct)' : 'Nearby'}${moved > 0 ? `(バスに溜まっていた ${moved} 件を Nearby へ移した)` : ''}`);
-      });
-      routed.subscribe((body) => this.onWire(gen, role, pair.peerId, body));
+        this.gnote(`内部制御の運び先: ${to === 'bus' ? 'バス(Direct)' : 'Nearby'}${moved > 0 ? `(バスに溜まっていた内部制御 ${moved} 件を Nearby へ移した。アプリのメッセージは移さない)` : ''}`);
+      }, (r) => this.logSend(r));
+      routed.subscribe((body, from) => this.onWire(gen, role, pair.peerId, body, from));
       this.ctl = routed;
       this.set({
         started: true, role, peer: { peerId: pair.peerId, peerName: pair.peerName },
@@ -651,7 +653,8 @@ export class Tether {
   // ---------- メッセージ ----------
 
   /**
-   * 相手へアプリのメッセージを送る。
+   * 相手へアプリのメッセージを送る。**運び先は常にバス(Direct)だけ**で、Nearby には載せない。
+   * バスが使えない間(Direct 未確立・未認証・切断中)はバスの保留に溜め、ttl が過ぎたら捨てる(Nearby にはフォールバックしない)。
    * - ttlMs 未指定: つながるまで溜めて、つながり次第 1 回だけ届ける(受諾など)
    * - ttlMs: 溜める最長時間。0 は「溜めない」(状態表示など、古くなれば無意味なもの)
    * - key: 同じ key の未送達は新しいものに置き換える(最新だけ届ければよいもの)
@@ -1042,12 +1045,15 @@ export class Tether {
     }
   }
 
-  private onWire(gen: number, role: TetherRole, peerId: string, body: unknown): void {
+  private onWire(gen: number, role: TetherRole, peerId: string, body: unknown, from?: Carrier): void {
     if (gen !== this.gen) return;
     if (!isWire(body)) return; // 知らない形式は捨てる
     this.touchPeer(peerId);
     switch (body.kind) {
       case 'tether.app':
+        // アプリのメッセージはバスだけで運ぶ。Nearby から来たものは受け付けない(旧版の相手など)
+        if (from === 'nearby') { this.gnote(`受信[アプリ] 種別=${kindOf(body)} ← Nearby(破棄: アプリのメッセージはバスのみ)`); break; }
+        this.gnote(`受信[アプリ] 種別=${kindOf(body)} ← バス`);
         for (const cb of [...this.msgSubs]) {
           try { cb(body.body, { role, peerId }); } catch (e: any) { this.log('onMessage で例外: ' + (e?.message ?? e)); }
         }
@@ -1283,6 +1289,7 @@ export class Tether {
     const s = this.state;
     return {
       role: s.role, started: s.started, suspend: this.suspendOk,
+      carriers: { control: this.pickCarrier(), appPending: this.ctl?.appPending ?? 0 },
       creating: s.role === 'host' && s.share === 'starting', joining: s.role === 'guest' && s.wifi === 'joining',
       directUp: s.role === 'host' ? s.share === 'on' && this.data.group !== false : s.wifi === 'joined',
       nearbyUp: s.link === 'connected', resumedBecause: this.resumedBecause, attempt: this.retry ? { n: this.retry.attempt, max: this.retry.max } : null,
@@ -1378,6 +1385,7 @@ export class Tether {
       }
       last = t;
       this.syncBus(gen);
+      this.bus?.sweep(); // 溜めたままの期限切れ(アプリのメッセージ)を捨てて記録する
       this.guard(gen, { t: 'tick' });
       const before = this.state.overall;
       this.deriveState();
@@ -1514,6 +1522,20 @@ export class Tether {
   /** いまの運び先: バスが認証済みになったことがあり、Direct 稼働中で Nearby を止めているあいだはバス。それ以外は Nearby */
   private pickCarrier(): Carrier {
     return this.bus && this.busRunning && this.busSeenUp && this.suspendOk && !this.gov.nearbyAllowed ? 'bus' : 'nearby';
+  }
+
+  /** 送信のログ(DH-LINK。中身は出さず、種別と運び先だけ) */
+  private logSend(r: SendReport): void {
+    if (r.channel === 'ctl') { this.gnote(`送信[制御] 種別=${r.kind} → ${r.to === 'bus' ? 'バス' : 'Nearby'}`); return; }
+    if (r.outcome === 'sent') this.gnote(`送信[アプリ] 種別=${r.kind} → バス`);
+    else if (r.outcome === 'queued') this.gnote(`送信[アプリ] 種別=${r.kind} → 溜め(${this.busRunning ? 'バス切断中・再接続待ち' : 'Direct/バス未確立'})`);
+    else this.gnote(`送信[アプリ] 種別=${r.kind} → 破棄(${r.reason === 'limit' ? '上限' : r.reason === 'no-bus' ? 'バス部品なし' : 'ttl=0 でバス未接続'})`);
+  }
+
+  private onBusEvent(e: BusEvent): void {
+    const tag = e.channel === 'app' ? 'アプリ' : '制御';
+    if (e.ev === 'flush') this.gnote(`送信[${tag}] 種別=${e.kind} → バス(溜めていた分)`);
+    else this.gnote(`送信[${tag}] 種別=${e.kind} → 破棄(${e.reason === 'limit' ? '上限' : 'ttl'})`);
   }
 
   private busTiming(): { pingMs: number; timeoutMs: number } {

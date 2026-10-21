@@ -154,31 +154,91 @@ test('バスも Echo も止まれば従来どおり degraded → 親機が Nearb
   c.cleanup();
 });
 
-test('縮退: Direct が戻らず Nearby が再開されたら、バスに溜まっていた分は Nearby で届く', async () => {
+test('縮退: Direct が戻らず Nearby が再開されても、アプリのメッセージは Nearby に載せない(バス復帰まで保留)。内部制御は Nearby へ移る', async () => {
   const c = await setup();
   await established(c);
   await until(() => c.bus!.isUp());
+  const logs: string[] = [];
+  c.hostT.onLog((l) => logs.push(l));
   c.guest.ctl.joinFails = 99;
   c.guest.ctl.probeOk = false;
   c.guest.loseWifi(); // 子機の Wi-Fi 切断 → バスも切れる
   await until(() => !c.bus!.isUp());
-  c.hostT.send({ late: 'host→guest' });
+  c.hostT.send({ type: 'late', v: 'host→guest' });
   assert.equal(c.got.guest.length, 0);
   await until(() => c.hostT.getState().nearby !== 'suspended' && c.guestT.getState().nearby !== 'suspended', 5000, 'both nearby resumed');
-  await until(() => c.got.guest.length === 1, 4000, 'delivered over nearby after fallback');
-  assert.deepEqual(c.got.guest[0], { late: 'host→guest' });
-  assert.ok(c.net.host.notes.some((n) => n.includes('運び先: Nearby')));
+  await wait(100);
+  assert.equal(c.got.guest.length, 0, 'Nearby では届かない');
+  assert.deepEqual([...c.net.host.sentTexts, ...c.net.guest.sentTexts].filter((t) => t.includes('tether.app')), []);
+  assert.equal(c.hostT.linkSnapshot().appPending, 1);
+  assert.equal(c.hostT.linkSnapshot().appCarrier, 'bus');
+  assert.equal(c.hostT.linkSnapshot().controlCarrier, 'nearby');
+  assert.ok(logs.some((l) => l.includes('送信[アプリ] 種別=late → 溜め(')));
+  assert.ok(c.net.host.notes.some((n) => n.includes('内部制御の運び先: Nearby')));
   c.cleanup();
 });
 
-test('旧版の親機(busPort を送らない)・バス部品なしの端末: 従来どおり Nearby だけで動く', async () => {
+test('バス切断中の send は Nearby に出ない。復帰で溜めた分が送信順に届き、ログは 溜め → バス(溜めていた分) → 受信', async () => {
+  const c = await setup();
+  await established(c);
+  await until(() => c.bus!.isUp());
+  const hostLogs: string[] = [], guestLogs: string[] = [];
+  c.hostT.onLog((l) => hostLogs.push(l)); c.guestT.onLog((l) => guestLogs.push(l));
+  const nearbySent = () => [...c.net.host.sentTexts, ...c.net.guest.sentTexts].filter((t) => t.includes('tether.app')).length;
+  const before = nearbySent();
+  c.bus!.link(false);
+  await until(() => !c.bus!.isUp());
+  c.hostT.send({ type: 'a' }); c.hostT.send({ type: 'b' }); c.hostT.send({ type: 'c' });
+  await wait(30);
+  assert.equal(nearbySent(), before);
+  assert.equal(c.hostT.linkSnapshot().appPending, 3);
+  c.bus!.link(true);
+  await until(() => c.got.guest.length === 3, 1000, 'resent');
+  assert.deepEqual(c.got.guest.map((x: any) => x.type), ['a', 'b', 'c']);
+  assert.equal(nearbySent(), before);
+  assert.equal(hostLogs.filter((l) => l.includes('送信[アプリ] 種別=a → 溜め(')).length, 1);
+  assert.equal(hostLogs.filter((l) => l.includes('送信[アプリ] 種別=a → バス(溜めていた分)')).length, 1);
+  assert.ok(guestLogs.some((l) => l.includes('受信[アプリ] 種別=a ← バス')));
+  c.cleanup();
+});
+
+test('接続中の send: ログは 送信[アプリ] → バス、内部制御は 送信[制御] 種別=… と運び先', async () => {
+  const c = await setup();
+  const logs: string[] = [];
+  c.hostT.onLog((l) => logs.push(l));
+  await established(c);
+  await until(() => c.bus!.isUp());
+  c.hostT.send({ type: 'open-map' });
+  await until(() => c.got.guest.length === 1);
+  assert.ok(logs.some((l) => l.includes('[DH-LINK] 送信[アプリ] 種別=open-map → バス')));
+  assert.ok(logs.some((l) => /\[DH-LINK\] 送信\[制御\] 種別=tether\.wifi → Nearby/.test(l)));
+  assert.ok(logs.every((l) => !l.includes('送信[アプリ]') || !l.includes('Nearby')));
+  c.cleanup();
+});
+
+test('上限: アプリの保留が上限を超えたら古いものから破棄(Nearby へは出ない)', async () => {
+  const c = await setup();
+  await established(c);
+  await until(() => c.bus!.isUp());
+  const logs: string[] = [];
+  c.hostT.onLog((l) => logs.push(l));
+  c.bus!.link(false);
+  await until(() => !c.bus!.isUp());
+  for (let i = 0; i < 205; i++) c.hostT.send({ type: 'x', i });
+  assert.equal(c.hostT.linkSnapshot().appPending, 200);
+  assert.equal(logs.filter((l) => l.includes('種別=x → 破棄(上限)')).length, 5);
+  c.cleanup();
+});
+
+test('バス部品なしの端末: アプリのメッセージは Nearby に載らず溜まるだけ', async () => {
   const c = await setup(SUSPEND, false);
   await established(c);
   c.guestT.send({ x: 1 });
   await wait(80);
   assert.equal(c.hostT.getState().nearby, 'suspended');
-  assert.equal(c.got.host.length, 0); // suspend 中の Nearby は止まっているので溜まるだけ(従来の挙動)
+  assert.equal(c.got.host.length, 0);
   assert.ok(c.guestT.getState().pending >= 1);
+  assert.deepEqual([...c.net.host.sentTexts, ...c.net.guest.sentTexts].filter((t) => t.includes('tether.app')), []);
   c.cleanup();
 });
 

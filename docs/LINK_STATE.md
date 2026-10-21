@@ -248,7 +248,7 @@ Direct 稼働中に送れるのは echo 上の heartbeat だけ。それ以外�
 
 ## 制御メッセージの運び先(Nearby / バス)と生存信号
 
-Direct 稼働中は Nearby を止めるので、`tether.send` などのアプリのメッセージは **Direct 上のバス**(ZeroMQ。`docs/GATEWAY_BUS.md` §11)で運ぶ。`Tether` は `RoutedControl`(`ControlTransport`)だけを見る。
+アプリのメッセージ(`tether.send`)は**状態に関係なく常に Direct 上のバスだけ**で運ぶ(Nearby には載せない。バスが使えない間はバスの保留に溜め、ttl で捨てる)。以下の表は **内部制御**(`tether.wifi` / hello / caps / timing / plan / need-wifi / unpair など)の運び先。Direct 稼働中は Nearby を止めるので、内部制御は **Direct 上のバス**(ZeroMQ。`docs/GATEWAY_BUS.md` §11)で運ぶ。`Tether` は `RoutedControl`(`ControlTransport`)だけを見る。
 
 | 状況 | 運び先 | 備考 |
 |---|---|---|
@@ -260,4 +260,6 @@ Direct 稼働中は Nearby を止めるので、`tether.send` などのアプリ
 - **バス断**: Nearby は再開しない(再接続が先)。ネイティブが再接続を続け、認証完了で未確認を seq 順に再送。受け手は (epoch, seq) で重複排除。
 - **Nearby への縮退**: governor が Nearby を再開した(T_direct・再接続の使い切り)、または子機が Wi-Fi 切断でバスを止めたとき、バスの未確認を送信順のまま Nearby の送信へ移す。バスの切断自体は governor に通知しない(生存信号が途絶えることで T_echo → T_direct が進む)。
 - **生存信号**: 生存確認はバスの **ZMTP heartbeat**(`ZMQ_HEARTBEAT_IVL / TIMEOUT / TTL`)+ socket monitor。ZMTP は「最後に受けた時刻」を出さないので、ネイティブは「生きた/切れた」イベントと**イベントの時刻**(`aliveAt`)だけを出す。**生存信号の最終時刻(`lastAliveAt`)は LinkGovernor が保持する**(`LinkGovernor.noteAliveAt(at)` が唯一の入口。max を取り古い時刻へは戻さない。JS が止まっていた間のイベントも、遅れて届いた時点で添えられた時刻で更新)。送り手(Echo・バス・ZMTP)に依存しない。画面・判定(T_echo / T_direct の `deriveOverall`・governor の `alive`)は `lastAliveAt`(`DataPath.aliveAt` / `linkSnapshot().path.lastAliveAt`)だけを読む。バス認証済みの間は子機は Echo(JS の heartbeat もネイティブ heartbeat も)を始めず、切断が hb×2 続いたら再開する(ヒステリシス)。詳細・実測・Echo 廃止計画は GATEWAY_BUS.md §12。Echo は当面残す(旧版互換)。親機はバス認証済みで子機を ready とみなす(Echo 回数の推定は Echo 経路の救済として残る)。
-- ログ: `[DH-LINK] 制御メッセージの運び先: …`、`[DH-LINK] バス接続/切断(理由)`、`[DH-BUS]`(TS 側)、ネイティブは logcat/診断の `DH-BUS`。
+- **アプリのメッセージ**: 運び先は常にバス。Nearby への縮退でバスの未確認を Nearby へ移すとき、**移すのは内部制御だけ**で、アプリのメッセージはバスの保留に残る(バス復帰で送る。ttl で捨てる)。Nearby から届いた `tether.app` は受け付けず捨てる。
+- 表示: `linkSnapshot()` の `controlCarrier`(内部制御の運び先)・`appCarrier`(常に `bus`)・`appPending`(バスの保留のアプリ分)。
+- ログ: `[DH-LINK] 内部制御の運び先: …`(切り替わったとき)、`送信[アプリ] 種別=… → バス|溜め(理由)|破棄(ttl/上限)`、`送信[アプリ] 種別=… → バス(溜めていた分)`、`受信[アプリ] 種別=… ← バス`、`送信[制御] 種別=… → Nearby|バス`(中身は出さない)、`[DH-LINK] バス接続/切断(理由)`、`[DH-BUS]`(TS 側)、ネイティブは logcat/診断の `DH-BUS`。
