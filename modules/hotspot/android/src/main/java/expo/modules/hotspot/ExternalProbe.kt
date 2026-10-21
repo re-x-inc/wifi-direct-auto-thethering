@@ -10,7 +10,7 @@ import java.net.Socket
  * 外形監視の供給元(ProbeRunner)。子機のネイティブで、親機の中継経由のインターネット到達を定期的に確かめる。
  * tether のコアはこれを知らない: JS の src/api/internetProbe.ts が結果を update(success, at, reason) に渡す(使わない選択もできる)。
  *
- * Heartbeat と同じ作り: 専用スレッド(dh-probe)、PARTIAL_WAKE_LOCK(tether:probe。setReferenceCounted(false)、stop で必ず解放)、
+ * 専用スレッド(dh-probe)、PARTIAL_WAKE_LOCK(tether:probe。setReferenceCounted(false)、stop で必ず解放)、
  * 参加した Wi-Fi の Network.socketFactory。**start の直後に最初の 1 周をすぐ実行**し、以後は間隔ごと、失敗の直後は確認間隔
  * (連続失敗が failThreshold に達するまで)。画面オフ中は screenOffIntervalMs。時刻は System.currentTimeMillis(JS の Date.now() と同じ)。
  */

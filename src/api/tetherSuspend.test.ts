@@ -22,14 +22,14 @@ const SUSPEND = {
 };
 
 async function setup(cfg: object = SUSPEND, beforeStart?: (f: Awaited<ReturnType<typeof pairedFakes>>) => void) {
-  const f = await pairedFakes();
+  // 到達確認はバス(ZMQ)の認証で行うので、バスの偽物を付ける
+  const f = await pairedFakes({}, { bus: true });
   beforeStart?.(f); // Tether は構築時に Nearby 部品を包むので、差し替えは構築の前に行う
   const hostT = new Tether(f.host.platform, cfg);
   const guestT = new Tether(f.guest.platform, cfg);
-  // 子機のハートビート(エコー接続)が親機に届く様子を再現する
-  let echo = true;
-  const timer = setInterval(() => { if (echo && f.guest.ctl.probeOk) f.host.emitEcho(); }, 10);
-  return { ...f, hostT, guestT, stopEcho: () => { echo = false; }, cleanup: () => { clearInterval(timer); hostT.stop(); guestT.stop(); } };
+  // ネイティブの ping/pong の代わり(バスが up の間は生存の時刻を進める)
+  const pulseTimer = setInterval(() => { if (f.bus?.isUp()) f.bus.pulse(); }, 10);
+  return { ...f, hostT, guestT, cleanup: () => { clearInterval(pulseTimer); hostT.stop(); guestT.stop(); } };
 }
 
 async function established(c: Awaited<ReturnType<typeof setup>>) {
@@ -54,13 +54,16 @@ test('Nearby 部品が suspend() を持たない(旧部品): エラーにせず�
   const logs: string[] = [];
   const c = await setup(SUSPEND, (f) => { (f.net.host as any).suspend = undefined; (f.net.guest as any).suspend = undefined; });
   c.hostT.onLog((l) => logs.push(l));
-  await c.hostT.start(); await c.guestT.start();
-  await until(() => c.guestT.getState().vpn === 'on', 3000, 'vpn');
-  await wait(300);
-  assert.equal(c.guestT.getState().nearby, 'up');
-  assert.equal(c.hostT.getState().nearby, 'up');
-  assert.ok(logs.some((l) => l.includes('suspend() 未対応')), '警告ログ');
-  c.cleanup();
+  try {
+    await c.hostT.start(); await c.guestT.start();
+    await until(() => c.guestT.getState().vpn === 'on', 3000, 'vpn');
+    await wait(300);
+    assert.equal(c.guestT.getState().nearby, 'up');
+    assert.equal(c.hostT.getState().nearby, 'up');
+    assert.ok(logs.some((l) => l.includes('suspend() 未対応')), '警告ログ');
+  } finally {
+    c.cleanup(); // 失敗しても周期タイマーを残さない(残すと実行が終わらない)
+  }
 });
 
 test('suspend: Direct 確立 → 両端末とも Nearby を止め、止めている間は広告・探索・接続の要求を出さない', async () => {
@@ -101,7 +104,6 @@ test('再接続 3 回とも失敗 → 親機が先に Nearby を再開し、子�
   c.hostT.subscribe((s) => { if (s.nearby !== 'suspended' && !resumedAt.host) resumedAt.host = Date.now(); });
   c.guestT.subscribe((s) => { if (s.nearby !== 'suspended' && !resumedAt.guest) resumedAt.guest = Date.now(); });
   c.guest.ctl.joinFails = 99;
-  c.guest.ctl.probeOk = false; // 子機のハートビートも止まる(親機はエコーを受けなくなる)
   c.guest.loseWifi();
   await until(() => !!resumedAt.host && !!resumedAt.guest, 4000, 'both resumed');
   assert.ok(resumedAt.host <= resumedAt.guest, `host ${resumedAt.host} guest ${resumedAt.guest}`);
@@ -111,17 +113,16 @@ test('再接続 3 回とも失敗 → 親機が先に Nearby を再開し、子�
   c.cleanup();
 });
 
-test('親機: エコーが止まっても T_echo の間は何もせず、T_echo で degraded、戻れば Nearby は再開しない', async () => {
+test('親機: バスが切れても T_echo の間は何もせず、T_echo で degraded、戻れば Nearby は再開しない', async () => {
   const c = await setup();
   await established(c);
   const seen: Overall[] = [];
   c.hostT.onOverall((o) => seen.push(o));
-  c.stopEcho();
+  c.bus!.link(false);
   await until(() => c.hostT.getState().overall === 'degraded', 1000, 'degraded');
   assert.equal(c.hostT.getState().nearby, 'suspended');
-  c.host.emitEcho(); // 子機が戻った
+  c.bus!.link(true); // 子機が戻った
   await wait(150);
-  c.host.emitEcho();
   assert.equal(c.net.host.suspended, true);
   assert.deepEqual(c.net.host.leaked, []);
   c.cleanup();
@@ -143,7 +144,6 @@ test('親機: グループ消滅 → Nearby は止めたまま固定グループ
   const c = await setup();
   await established(c);
   const direct0 = c.host.calls.filter((x) => x === 'startDirect').length;
-  c.stopEcho(); // グループが無ければ子機のエコー接続も届かない
   c.host.emitGroup({ up: false, clients: 0 });
   await until(() => c.host.calls.filter((x) => x === 'startDirect').length > direct0, 2000, 'recreate');
   await wait(100);
@@ -180,7 +180,6 @@ test('画面用: linkSnapshot / onLink / state.linkState に状態名・ラベ�
   assert.equal(c.guestT.getState().linkState.name, 'direct-active');
   // 再接続中は「Direct 再接続中 n/3」
   c.guest.ctl.joinFails = 99;
-  c.guest.ctl.probeOk = false;
   c.guest.loseWifi();
   await until(() => c.guestT.linkSnapshot().state.name === 'direct-retrying', 2000, 'retrying');
   await until(() => /^Direct 再接続中 [123]\/3$/.test(c.guestT.linkSnapshot().state.label), 2000, 'label');
@@ -229,32 +228,3 @@ test('onNearbyError: Nearby のエラーイベントを読み取り専用で購�
 
 // 実機 b6 12:18(tether=7815375): 子機が Direct に入ると Wi-Fi LAN 上の Nearby が切れ、子機の wifi-result が親機に届かない。
 // 親機は到達を確認できず、Echo(ハートビート)が届いていても ready に進めなかった。
-test('親機: 子機の wifi-result が届かなくても、ハートビート(Echo)が繰り返し届けば ready → Nearby を止める', async () => {
-  let dropped = 0;
-  const c = await setup(SUSPEND, (f) => {
-    const send = f.net.guest.send.bind(f.net.guest);
-    f.net.guest.send = (id: string, text: string) => { if (text.includes('tether.wifi-result')) { dropped++; return; } return send(id, text); };
-  });
-  await c.hostT.start();
-  await c.guestT.start();
-  await until(() => c.guestT.getState().vpn === 'on', 3000, 'vpn');
-  await until(() => c.hostT.getState().nearby === 'suspended' && c.guestT.getState().nearby === 'suspended', 3000, 'both suspended');
-  assert.ok(dropped >= 1, 'wifi-result を落とせていること');
-  assert.equal(c.hostT.getState().peerReach, null);
-  assert.equal(c.hostT.getState().overall, 'connected');
-  c.cleanup();
-});
-
-test('親機: 子機の wifi-result 未着で Echo が 1 回だけ(到達確認の probe)なら、ready にしない', async () => {
-  const c = await setup(SUSPEND, (f) => {
-    const send = f.net.guest.send.bind(f.net.guest);
-    f.net.guest.send = (id: string, text: string) => { if (text.includes('tether.wifi-result')) return; return send(id, text); };
-  });
-  c.stopEcho();
-  await c.hostT.start();
-  await wait(50);
-  c.host.emitEcho(); // probe の 1 回だけ
-  await wait(200);
-  assert.equal(c.net.host.suspended, false);
-  c.cleanup();
-});

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeNearbyPair } from '../link/fakeNearby';
 import { fakePlatform } from './fakePlatform';
+import { fakeBusPair } from '../link/fakeBus';
 import { Tether } from './tether';
 import { TetherError, HandshakeEvent } from './types';
 import { NativeCapabilities } from './capability';
@@ -19,8 +20,10 @@ const CFG = { link: { baseMs: 5, maxMs: 20, pingTimeoutMs: 200 }, connectTimeout
 
 async function setup(o: { host?: Partial<NativeCapabilities>; guest?: Partial<NativeCapabilities>; directFails?: boolean } = {}) {
   const net = fakeNearbyPair();
-  const host = fakePlatform(net.host, { cellular: true, directFails: o.directFails, caps: o.host, model: 'HostPhone' });
-  const guest = fakePlatform(net.guest, { cellular: false, caps: o.guest, model: 'GuestPhone' });
+  // 到達確認はバス(ZMQ)の認証で行うので、両端末にバスの偽物を付ける
+  const bus = fakeBusPair();
+  const host = fakePlatform(net.host, { cellular: true, directFails: o.directFails, caps: o.host, model: 'HostPhone', bus: bus.host });
+  const guest = fakePlatform(net.guest, { cellular: false, caps: o.guest, model: 'GuestPhone', bus: bus.guest });
   // 能力の待ち時間だけ実時間にして、交換が先に終わることを確かめられるようにする
   const fast = host.platform.sleep;
   host.platform.sleep = (ms) => (ms === CAPS_WAIT ? wait(1500) : fast(ms));
