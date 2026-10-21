@@ -203,19 +203,8 @@ export interface TetherConfig {
   vpnPermissionWaitSec?: number;
   /** 親機: 子機の能力を待つ最長時間(ms)。キャッシュがあれば待たない。既定 5000 */
   capsWaitMs?: number;
-  /**
-   * Wi-Fi Direct が生きている間の Nearby の扱い(両端末で同じにする。片方だけ 'suspend' のときは 'keep' のまま動く)。
-   * 'keep'    = 従来どおり(Direct 中も Nearby をつなぎ続ける)
-   * 'suspend' = Direct が確立したら Nearby の広告・探索・接続を止め、Direct が切れたときだけ再開する
-   * 既定 'keep'(実機確認後に 'suspend' へ変える想定)
-   */
   /** true: Nearby/Direct の不変条件(src/link/linkGovernor.ts)に違反したら例外を投げる(テスト用)。既定 false=拒否して DH-LINK にログ */
   strictLinkGuard?: boolean;
-  /**
-   * Direct 稼働中の Nearby の扱い。既定は DEFAULT_NEARBY_WHILE_DIRECT(src/link/linkMode.ts)。
-   * これは**自分の希望**で、実効の方式は接続の最初の hello で相手と交換して決まる(両方 suspend のときだけ suspend。linkSnapshot().mode)。
-   */
-  nearbyWhileDirect?: 'keep' | 'suspend';
   /** 子機のハートビートを画面オフ中だけ延ばす間隔(ms)。省略=延ばさない。T_echo の半分を超えない範囲に丸める */
   hbScreenOffIntervalMs?: number;
   /** ネイティブのハートビートが動いている間 PARTIAL_WAKE_LOCK を保持するか。既定 true */
@@ -223,7 +212,7 @@ export interface TetherConfig {
   /**
    * 時間の設定（開始待ち・タイムアウト・閾値。すべて任意）。範囲外は既定に丸めてログ、T_echo < T_direct < T_nearby は補正してログ。
    * 型・既定・範囲は src/link/timingConfig.ts。start() のたびに「既定 < ここ < setTimingOverride で保存した値」で決まり、
-   * suspend 方式の子機は共有分（閾値・hb・再接続）を親機の値に揃える。
+   * 子機は共有分（閾値・hb・再接続）を親機の値に揃える。
    */
   timing?: Partial<LinkTimingConfig>;
   /** true: timing の範囲チェックを省く（テスト用に短い時間を使う） */

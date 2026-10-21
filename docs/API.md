@@ -60,11 +60,11 @@ comparisonMarkdown([reportA, reportB], /* onlyDiffs */ true); // 機種比較の
 - `CapabilityPort` の任意メソッド: `diagnostics()`(網羅採取)、`saveFile(name, text)`(アプリ専用領域へ保存し、パスを返す)。
 - 診断画面: `src/DiagnosticsPanel.tsx`(tether の `App.tsx` に組み込み済み。文字つきボタンのみ)。比較: `npm run diag:compare -- <フォルダ> [--diff]`。
 
-## Direct 稼働中の Nearby と総合状態(`TetherConfig.nearbyWhileDirect`)
+## Direct 稼働中の Nearby と総合状態
 
 詳細・状態遷移図・閾値・クラス設計は [LINK_STATE.md](LINK_STATE.md)。
 
-- `TetherConfig.nearbyWhileDirect: 'keep' | 'suspend'`(既定 `'keep'`)。`'suspend'` は Direct が張れている間 Nearby の広告・探索・接続を止め、Direct が切れたときだけ再開する。これは自分の希望で、実効の方式は hello の交換で決まる(両方 suspend のときだけ suspend。docs/LINK_STATE.md「方式の交換」)。`directGuard`(echoMs / directMs / nearbyMs / hbIntervalMs / tickMs)・`directRetry`(attempts / backoffMs / joinTimeoutMs / attemptMs)で時間を変えられる。
+- Direct が張れている間は **常に** Nearby の広告・探索・接続を止め、Direct が切れたときだけ再開する(設定項目なし。keep 方式の廃止の経緯は LINK_STATE.md「廃止した keep 方式」)。`TetherConfig.nearbyWhileDirect` と `linkSnapshot().mode` は削除した。`directGuard`(echoMs / directMs / nearbyMs / hbIntervalMs / tickMs)・`directRetry`(attempts / backoffMs / joinTimeoutMs / attemptMs)で時間を変えられる。
 - `TetherState.nearby`: `'up' | 'down' | 'suspended'`(`suspended` は意図した停止で異常ではない)。
 - `TetherState.overall`: `'connected' | 'degraded' | 'disconnected'`。**データ経路だけ**から導く(Nearby の link には依存しない)。`Tether.onOverall(cb)` で変化を購読できる。
 - `TetherConfig.hbScreenOffIntervalMs`(省略=延ばさない)/ `hbWakeLock`(既定 true): 子機のハートビートはネイティブ(Hotspot モジュールの専用スレッド)で続き、JS が止まっても送る。画面オフ中だけ間隔を延ばす値(T_echo の半分まで)と、動作中 PARTIAL_WAKE_LOCK を持つかの指定。ネイティブ側が無い部品では従来の JS ループで動く。ログのタグ: `DH-HB`(logcat)、`[DH-LINK] ネイティブのハートビート…`。
@@ -74,4 +74,4 @@ comparisonMarkdown([reportA, reportB], /* onlyDiffs */ true); // 機種比較の
 
 ## Direct 稼働中のメッセージ(バス)
 
-`tether.send()` / `onMessage()` は、Direct 稼働中(`nearbyWhileDirect: 'suspend'` で Nearby を止めている間)は Direct 上のバスで、それ以外は Nearby で運ばれる。呼び出し側の API は変わらない。切断中は溜めて再接続後に送信順で再送(ttl・key も同じ意味)。受け手には at-least-once のうち重複を除いて 1 回だけ渡る。詳細は [GATEWAY_BUS.md](GATEWAY_BUS.md) §11 / [LINK_STATE.md](LINK_STATE.md)。
+`tether.send()` / `onMessage()` は、Direct 稼働中(Nearby を止めている間)は Direct 上のバスで、それ以外は Nearby で運ばれる。呼び出し側の API は変わらない。切断中は溜めて再接続後に送信順で再送(ttl・key も同じ意味)。受け手には at-least-once のうち重複を除いて 1 回だけ渡る。詳細は [GATEWAY_BUS.md](GATEWAY_BUS.md) §11 / [LINK_STATE.md](LINK_STATE.md)。

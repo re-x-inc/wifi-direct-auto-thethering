@@ -45,6 +45,6 @@ test('Direct 再接続中は degraded(尽きれば retrying が外れて disconn
   assert.equal(deriveOverall(base({ role: 'guest', retrying: false })), 'disconnected');
 });
 
-test('keep 方式ではエコーの鮮度を見ない', () => {
+test('suspend 未対応の旧部品(heartbeatMode=false)ではエコーの鮮度を見ない', () => {
   assert.equal(deriveOverall(base({ heartbeatMode: false, data: d({ group: true, reach: { ok: true, at: 1 } }) })), 'connected');
 });

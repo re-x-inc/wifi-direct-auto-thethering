@@ -15,7 +15,6 @@ const until = async (cond: () => boolean, ms = 3000, what = '') => {
 /** 時間を縮めた設定(hb 20ms → T_echo 60 / T_direct 200 / T_nearby 260) */
 const CFG = {
   link: { baseMs: 5, maxMs: 20, pingTimeoutMs: 400 }, connectTimeoutMs: 100, probeIntervalMs: 1,
-  nearbyWhileDirect: 'suspend' as const,
   strictLinkGuard: true,
   timingUnchecked: true,
   timing: { hbIntervalMs: 20, tickMs: 10, echoMs: 60, directMs: 200, nearbyMs: 260, settleMs: 30, retryAttempts: 3, retryBackoffMs: [5], retryJoinTimeoutMs: 50, retryAttemptMs: 50, rejoinMs: 500 },

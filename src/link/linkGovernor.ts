@@ -2,20 +2,18 @@ import type { NearbyApi } from './nearbyTransport';
 import { GuardAction, GuardEvent, GuardPhase, GuardState, GuardTiming, initialGuard, nearbyShouldBeOff, stepGuard } from './directGuard';
 import type { HotspotPort } from '../api/types';
 import type { DataPath, NearbyPhase, Overall } from './dataPath';
-import type { LinkModeInfo } from './linkMode';
 import { labelOf, LinkStateInfo, LinkStateName, Transition, WaitingFor } from './stateLabels';
 
 /** 画面表示用に Tether が渡す、状態機械の外側の情報 */
 export interface LinkContext {
   role: 'host' | 'guest' | null;
   started: boolean;
-  nearbyMode: 'keep' | 'suspend';
-  /** 方式の交換の結果(自分・相手の名乗りと実効方式・理由) */
-  linkMode?: LinkModeInfo;
+  /** Nearby 部品が suspend() を持つか。false は旧部品の縮退動作(Direct 中も Nearby を止められない) */
+  suspend: boolean;
   /** 親機の share / 子機の wifi（'starting'|'joining' などの作成中判定用） */
   creating: boolean;
   joining: boolean;
-  /** keep 方式で Direct が張れている */
+  /** (suspend 未対応の旧部品)Direct が張れている */
   directUp: boolean;
   nearbyUp: boolean;
   /** Nearby を再開した理由（再開してまだ Direct に戻っていない間だけ） */
@@ -24,7 +22,7 @@ export interface LinkContext {
   overall: Overall;
   nearby: NearbyPhase;
   data: DataPath;
-  /** 起動した時刻（stopped/keep の enteredAt 用） */
+  /** 起動した時刻（stopped/縮退時の enteredAt 用） */
   since: number;
   /** 有効な設定値（resolveTiming の結果と GuardTiming）。秘密を含まない */
   timing: unknown;
@@ -37,8 +35,6 @@ export interface LinkSnapshot {
   path: { nearby: NearbyPhase; group: boolean | null; echoAt: number | null; reach: DataPath['reach']; heartbeat: DataPath['heartbeat'] };
   /** 直近の遷移（古い順、最大 HISTORY_MAX 件）。秘密・SSID・パスは含まない */
   history: Transition[];
-  /** 方式の交換の結果(後方互換のため任意)。実効方式は mode.effective */
-  mode?: LinkModeInfo;
   timing: unknown;
   at: number;
 }
@@ -181,7 +177,7 @@ export class LinkGovernor {
     const c = this.o.context?.() ?? null;
     const tm = this.o.timing;
     const s = this.s;
-    const suspend = !c || c.nearbyMode === 'suspend';
+    const suspend = !c || c.suspend;
     let name: LinkStateName;
     let waiting: { for: WaitingFor; deadlineAt: number } | null = null;
     const attempt = c?.attempt ?? null;
@@ -208,7 +204,7 @@ export class LinkGovernor {
     return {
       state, overall: c?.overall ?? 'disconnected',
       path: { nearby: c?.nearby ?? 'down', group: d?.group ?? null, echoAt: d?.echoAt ?? null, reach: d?.reach ?? null, heartbeat: d?.heartbeat ?? null },
-      history: [...this.hist], mode: c?.linkMode, timing: c?.timing ?? tm, at: now,
+      history: [...this.hist], timing: c?.timing ?? tm, at: now,
     };
   }
 
