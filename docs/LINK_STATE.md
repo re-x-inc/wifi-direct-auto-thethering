@@ -243,6 +243,9 @@ Direct 稼働中に送れるのは echo 上の heartbeat だけ。それ以外�
 `LinkSnapshot`: `state`(name / label / phase / enteredAt / elapsedSec / waiting{for, deadlineAt(epoch ms), remainingMs} / attempt{n,max})、`overall`、
 `path`(nearby up|down|suspended / group / echoAt / reach / heartbeat / **lastAliveAt**(LinkGovernor が保持する最終生存時刻。無ければ null)/ **bus**(`authenticated` 認証済み・`disconnected` 切れている・`off` 使っていない))と `data`(state.data と同じ。`aliveAt` / `bus` を含む)、`history`(直近 50 件の遷移: at / from / to / event / reason。SSID・パス・共有コードは含まない)、`timing`(有効な設定値と状態機械の時間)。
 
+**Nearby 自動再開の時刻(UI 向け)**: `direct-retrying`(親機は T_direct、子機は T_nearby)と `direct-rebuilding`(rejoinMs)の間、`state.linkState.waiting.deadlineAt`(epoch ms)が自動再開の時刻、`waiting.remainingMs` が残りで、`waiting.for` が何を待つか(`T_direct` / `T_nearby` / `rejoin`)。`TetherState.linkState` と `linkSnapshot().state` の両方で読める(新しいフィールドは無い)。親機が再接続を使い切ったときは、この時刻より早く再開することがある。
+同じ間、DH-LINK ログに約 12 秒ごと(10〜15 秒の範囲)で `再開待ち: Nearby 再開まであと Ns(理由=…、試行 n 回目)` を出す(`src/link/resumeEta.ts`。理由は LostReason の固定語。SSID・パス・座標・電話番号は出さない)。
+
 画面の想定: ホームの接続行 = `state.label` + `overall`(色)/ 待つ画面 = `label` と `waiting.deadlineAt` のカウントダウン、再接続中は `attempt` / 診断画面 = `history` と `path`・`timing` の一覧。
 
 
