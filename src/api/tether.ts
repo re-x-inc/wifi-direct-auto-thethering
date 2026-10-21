@@ -175,6 +175,14 @@ export class Tether {
     return () => this.overallSubs.delete(cb);
   }
 
+  /**
+   * Nearby のネイティブ層のエラー（広告・探索・接続の失敗。8007 STATUS_RADIO_ERROR など）を読む。読み取り専用で、Nearby の制御ではない。
+   * 利用側アプリがネイティブモジュール（NearbyLink）を直接参照しなくて済むようにするための入口。戻り値で購読解除
+   */
+  onNearbyError(cb: (e: { op: string; code: number }) => void): () => void {
+    return this.p.nearby.on('onError', (e: { op: string; code: number }) => cb(e));
+  }
+
   /** 相手から届いたアプリのメッセージ(send() で送られたもの) */
   onMessage(cb: (body: unknown, meta: MessageMeta) => void): () => void {
     this.msgSubs.add(cb);

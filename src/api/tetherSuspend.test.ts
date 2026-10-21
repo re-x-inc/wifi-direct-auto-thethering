@@ -201,3 +201,14 @@ test('親機が正: 親機の閾値を子機が採用する(子機に別の値�
   assert.equal(guestT.getTiming().tickMs, 10); // 端末ごとの分は自分の値
   hostT.stop(); guestT.stop();
 });
+
+test('onNearbyError: Nearby のエラーイベントを読み取り専用で購読できる（利用側がネイティブを直接参照しない）', async () => {
+  const f = await pairedFakes();
+  const t = new Tether(f.guest.platform, {});
+  const got: number[] = [];
+  const off = t.onNearbyError((e) => got.push(e.code));
+  f.net.guest.emit('onError', { op: 'discover', code: 8007 });
+  off();
+  f.net.guest.emit('onError', { op: 'discover', code: 8012 });
+  assert.deepEqual(got, [8007]);
+});

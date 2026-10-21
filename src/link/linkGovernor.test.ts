@@ -89,3 +89,17 @@ test('reset で Nearby は誰でも使える状態に戻る', () => {
   c.g.reset();
   assert.equal(c.g.nearbyAllowed, true);
 });
+
+test('I6: joinWifi はどの phase でも許す（Nearby 接続中の初回参加・Nearby 停止中の再接続）。phase を DH-LINK に残す', async () => {
+  const c = make(true);
+  const f = fakePlatform(c.net.host, { cellular: true });
+  const h = c.g.wrapHotspot(f.platform.hotspot);
+  await h.joinWifi('ssid', 'pass'); // nearby
+  c.g.dispatch({ t: 'ready' }); c.at(100); c.g.dispatch({ t: 'tick' }); // direct
+  await h.joinWifi('ssid', 'pass', 5_000);
+  c.g.dispatch({ t: 'lost', reason: 'wifi-lost' }); // retrying
+  await h.joinWifi('ssid', 'pass', 5_000);
+  assert.equal(f.calls.filter((x) => x.startsWith('join:')).length, 3);
+  assert.equal(c.g.violations.length, 0);
+  assert.ok(c.logs.some((l) => l.includes('joinWifi（I6: 許可）phase=retrying')));
+});

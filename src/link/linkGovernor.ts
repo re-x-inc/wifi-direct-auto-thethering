@@ -49,6 +49,10 @@ const HISTORY_MAX = 50;
  *  I1  Direct 稼働中(direct / retrying / rejoining)は Nearby の advertise・discover・requestConnect を出さない
  *  I2  Nearby の再開(resume)は T_direct(親機)/ T_nearby(子機)の経過後、または親機が再接続を使い切ったときだけ。早すぎる再開は拒否
  *  I3  再接続の順序: 接続情報の再送 → Nearby を閉じて完了を待つ → 固定グループの作成。Nearby が止まる前の startDirect は拒否
+ *  I6  joinWifi（子機の Direct 参加）は**どの phase でも許す**。理由: ①初回の参加は Nearby で接続情報を受け取った直後（phase = nearby / settling）に
+ *      Nearby 接続中のまま行う設計で、禁止すると確立できない ②再接続・作り直しの参加は Nearby を止めたまま行う（retrying / rejoining）③参加は子機が
+ *      Wi-Fi クライアントとして入るだけで、Nearby の接続・帯域アップグレードを起こさない（P2P の GO 側のリソースは親機）。ただし追跡できるよう
+ *      phase と Nearby 停止の有無を DH-LINK に1行残す（違反ではない）
  *  I4  遷移は表にある (状態, 事象) だけ。それ以外は無視して記録(directGuard.stepGuard が表)
  *  I5  時間は now を注入する(テストで差し替え)。タイマーは持たない: tick を呼ぶ側が駆動する
  */
@@ -232,6 +236,12 @@ export class LinkGovernor {
     const g = this;
     return new Proxy(h, {
       get(t, k, r) {
+        if (k === 'joinWifi') {
+          return (...a: Parameters<HotspotPort['joinWifi']>) => {
+            g.o.log(`joinWifi（I6: 許可）phase=${g.s.phase} nearbyStopped=${g.nearbyStopped} timeout=${a[2] ?? 'default'}ms`);
+            return t.joinWifi(...a);
+          };
+        }
         if (k === 'startDirect') {
           return (...a: Parameters<HotspotPort['startDirect']>) => {
             if (g.rebuilding && !g.nearbyStopped) {

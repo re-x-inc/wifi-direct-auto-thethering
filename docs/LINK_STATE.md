@@ -165,10 +165,20 @@ classDiagram
 | I1 | Direct 稼働中(direct / retrying / rejoining)は Nearby の advertise・discover・requestConnect を出さない | `wrapNearby` が phase を見て拒否(native 側も suspend 中は無視) | 拒否して DH-LINK に `violation I1`(テスト `strictLinkGuard` では `LinkViolation` を throw) |
 | I2 | Nearby の再開は T_direct(親機)/ T_nearby(子機)の経過後、または親機が再接続を使い切ったときだけ | 遷移表(`stepGuard`)だけが resume を出す。governor が時間も再確認 | 拒否+`violation I2` |
 | I3 | 再接続順序: 接続情報の再送 → Nearby を閉じて完了を待つ → 固定グループ作成 | rebuild 中は Nearby 停止完了までの `startDirect` を拒否 | 拒否+`violation I3` |
+| I6 | joinWifi（子機の Direct 参加）は**どの phase でも許す** | `wrapHotspot` が通し、phase と Nearby 停止の有無を DH-LINK に 1 行残す | 違反ではない（追跡用ログのみ） |
 | I4 | 遷移は表にある (状態, 事象) だけ | `stepGuard` が表。それ以外は状態不変 | 無視 |
 | I5 | 時間は注入(`now`)。governor はタイマーを持たず tick で駆動 | `GovernorOptions.now` | — |
 
-ネイティブ部品(`NearbyApi` / `HotspotPort`)は `Tether` が governor の包んだものでしか使わない(`this.p.nearby` / `this.p.hotspot` の直接参照は無い)。
+**I6 の判断（joinWifi を許す理由）**: ①初回の参加は Nearby で接続情報を受け取った直後（phase = nearby / settling）に Nearby 接続中のまま行う設計で、禁止すると Direct を確立できない
+②再接続・作り直しの参加は Nearby を止めたまま行う（retrying / rejoining）③参加は子機が Wi-Fi クライアントとして入るだけで、Nearby の接続や帯域アップグレードを起こさない（P2P の GO 側のリソースは親機）。禁止するのは Nearby 側（I1）と親機のグループ作成（I3）。
+
+### ネイティブを迂回させない仕組み
+
+- `Tether` は governor の包んだ `this.nearby` / `this.hotspot` しか使わない(`this.p.nearby` / `this.p.hotspot` の直接参照は無い)。
+- `src/api/index.ts` は `nativePlatform`（生の部品）を**公開しない**。利用側は `getTether()` だけを使う（`getTether` が内部で使う）。
+- ESLint `no-restricted-imports`: `modules/*`・`src/nearbyApi.ts`・`src/api/native.ts` を import してよいのは `src/api/native.ts` / `src/nearbyApi.ts` / `src/api/index.ts` だけ。他は lint エラー。
+- Nearby のネイティブエラー（8007 など）を画面側が読む用途は、ネイティブ直参照ではなく `tether.onNearbyError(cb)`（読み取り専用）に置き換える。mobile の `host/src/pairing/nearbyEvents.ts` はこれに差し替えられる（別 PR。置き換えまでは読み取り専用の例外として残してよい）。
+  比較: 許可リストに残す案は迂回の入口が残る／`onNearbyError` を公開する案は入口が一つで型も付く → 後者を採用。
 
 ## 制御メッセージ(Direct 稼働中は Nearby が止まる)
 
