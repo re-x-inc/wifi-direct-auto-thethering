@@ -7,8 +7,31 @@ Direct の固定グループが生きている最中に Nearby が(再)接続す
 09:26 は子機 0 台(clients=0)でも起きた。公開 API に帯域アップグレードの抑止・medium 指定の手段が無いため、
 **Direct が生きている間は Nearby の広告・探索・接続要求をすべて止め、Direct が切れたときだけ Nearby で探しに行く**。
 
-設定: `TetherConfig.nearbyWhileDirect: 'keep' | 'suspend'`(既定 `'keep'` = 従来どおり)。**両端末で同じ値にする**
-(子機は `tether.wifi-result` に `suspend` を載せ、親機は両方が suspend のときだけ Nearby を止める)。
+設定: `TetherConfig.nearbyWhileDirect: 'keep' | 'suspend'`(既定は `DEFAULT_NEARBY_WHILE_DIRECT` = `'keep'`、定義は `src/link/linkMode.ts` の 1 箇所)。
+これは**自分の希望**で、実効の方式は接続の最初の hello で相手と交換して決まる(次節)。両端末の設定が食い違っても、実効方式は必ず揃う。
+
+## 方式の交換(hello)
+
+2026-10-21 の実機で、親機=suspend・子機=keep の食い違いにより、keep の子機が heartbeat を送らず、親機が 15 秒後に「生存信号なし」で retrying に入った。
+食い違いを設定の運用に頼らず、接続のたびに hello で交換して揃える。
+
+1. 子機は接続のたびに `tether.hello` に自分の希望 `nwd`(`keep`|`suspend`)と共有 timing の版 `tv` を載せる。
+2. 親機は hello を受けた時点(能力の交換・Direct 作成より前)で実効方式を決め、`tether.timing`(既存の timing 配布と同じ経路)の `mode` に載せて返す。親機は Direct を作る前に hello を最長 `capsWaitMs` 待つ。
+3. 子機は `mode` に従う。両端末の LinkGovernor は同じ実効方式で動く。
+
+| 親機の希望 | 子機の名乗り | 実効 | 理由 |
+|---|---|---|---|
+| suspend | suspend | **suspend** | 両方 suspend のときだけ |
+| suspend | keep | keep | 子機が keep |
+| keep | suspend | keep | 親機が keep |
+| keep | keep | keep | |
+| suspend | 名乗りなし(旧版) | keep | 方式の交換に未対応 |
+| suspend | 未着(確定前に Direct が張れた) | keep | 安全側。あとから suspend を名乗られても上げない |
+
+- 確定するまでの実効は keep。suspend へ上げられるのは Direct を作る/参加する前だけ(親機は共有開始の待ちを終えたあと、子機は Wi-Fi 参加の前)。Direct 稼働中は Nearby が止まって交換できないため、途中で suspend に変わることはない。keep へ下げるのはいつでも安全なので許す。
+- 旧親機(`mode` なしの timing / timing なし)に当たった新子機も keep。旧版の suspend 子機は自分では suspend のまま動くので、その場合は `wifi-result.suspend`(下)が安全網になる。
+- `tether.wifi-result` の `suspend` は残す。交換が成立すれば冗長だが、①旧版(#20)の親機は交換を知らずにこれで子機の方式を判断する ②子機が Direct 参加後に交換結果を受けた取りこぼしの安全網、のため。全端末が更新されたら削除してよい。
+- ログ: DH-LINK に `方式: 自分=suspend 相手=keep → 実効=keep(理由)` を 1 行。`linkSnapshot().mode`(`{ self, peer, effective, reason }`。peer は `keep|suspend|legacy|null`)に出る。後方互換の追加フィールド。
 
 ## 三つの閾値(T_echo < T_direct < T_nearby)
 

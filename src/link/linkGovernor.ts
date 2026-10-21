@@ -2,6 +2,7 @@ import type { NearbyApi } from './nearbyTransport';
 import { GuardAction, GuardEvent, GuardPhase, GuardState, GuardTiming, initialGuard, nearbyShouldBeOff, stepGuard } from './directGuard';
 import type { HotspotPort } from '../api/types';
 import type { DataPath, NearbyPhase, Overall } from './dataPath';
+import type { LinkModeInfo } from './linkMode';
 import { labelOf, LinkStateInfo, LinkStateName, Transition, WaitingFor } from './stateLabels';
 
 /** 画面表示用に Tether が渡す、状態機械の外側の情報 */
@@ -9,6 +10,8 @@ export interface LinkContext {
   role: 'host' | 'guest' | null;
   started: boolean;
   nearbyMode: 'keep' | 'suspend';
+  /** 方式の交換の結果(自分・相手の名乗りと実効方式・理由) */
+  linkMode?: LinkModeInfo;
   /** 親機の share / 子機の wifi（'starting'|'joining' などの作成中判定用） */
   creating: boolean;
   joining: boolean;
@@ -34,6 +37,8 @@ export interface LinkSnapshot {
   path: { nearby: NearbyPhase; group: boolean | null; echoAt: number | null; reach: DataPath['reach']; heartbeat: DataPath['heartbeat'] };
   /** 直近の遷移（古い順、最大 HISTORY_MAX 件）。秘密・SSID・パスは含まない */
   history: Transition[];
+  /** 方式の交換の結果(後方互換のため任意)。実効方式は mode.effective */
+  mode?: LinkModeInfo;
   timing: unknown;
   at: number;
 }
@@ -203,7 +208,7 @@ export class LinkGovernor {
     return {
       state, overall: c?.overall ?? 'disconnected',
       path: { nearby: c?.nearby ?? 'down', group: d?.group ?? null, echoAt: d?.echoAt ?? null, reach: d?.reach ?? null, heartbeat: d?.heartbeat ?? null },
-      history: [...this.hist], timing: c?.timing ?? tm, at: now,
+      history: [...this.hist], mode: c?.linkMode, timing: c?.timing ?? tm, at: now,
     };
   }
 
