@@ -69,6 +69,7 @@ comparisonMarkdown([reportA, reportB], /* onlyDiffs */ true); // 機種比較の
 - `TetherState.overall`: `'connected' | 'degraded' | 'disconnected'`。**データ経路だけ**から導く(Nearby の link には依存しない)。`Tether.onOverall(cb)` で変化を購読できる。
 - `TetherConfig.hbScreenOffIntervalMs`(省略=延ばさない)/ `hbWakeLock`(既定 true): 子機のハートビートはネイティブ(Hotspot モジュールの専用スレッド)で続き、JS が止まっても送る。画面オフ中だけ間隔を延ばす値(T_echo の半分まで)と、動作中 PARTIAL_WAKE_LOCK を持つかの指定。ネイティブ側が無い部品では従来の JS ループで動く。ログのタグ: `DH-HB`(logcat)、`[DH-LINK] ネイティブのハートビート…`。
 - `TetherState.data`: `{ group, echoAt, heartbeat, okAt, reach, busAt, aliveAt, bus }`(`aliveAt` = 最後に Direct の生存を確認した時刻(LinkGovernor が保持。Echo・バス・ZMTP heartbeat のどれから来ても同じ)/ `bus` = `'authenticated' | 'disconnected' | 'off'`。親機: グループの有無・子機のエコー最終受付 / 子機: Wi-Fi 参加・ハートビート・到達確認)。
+- `TetherState.linkState.waiting`(= `linkSnapshot().state.waiting`): `{ for: 'T_direct' | 'T_nearby' | 'rejoin' | …, deadlineAt(epoch ms), remainingMs } | null`。`direct-retrying` / `direct-rebuilding` の間は **Nearby 自動再開の時刻** (`deadlineAt`)。UI のカウントダウンに使える(既存フィールド。親機が再接続を使い切ると、これより早く再開することがある)。同じ間、DH-LINK ログへ約 12 秒ごとに `再開待ち: Nearby 再開まであと Ns(理由=…、試行 n 回目)` を出す。
 - 既存の購読者への影響なし(フィールド追加のみ)。`link` は Nearby の状態のまま(suspend 中は `'waiting'`)なので、接続表示には `overall` を使う。
 
 ## Direct 稼働中のメッセージ(バス)
