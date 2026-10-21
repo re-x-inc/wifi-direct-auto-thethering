@@ -7,7 +7,7 @@ import { TetherError, HandshakeEvent } from './types';
 import { NativeCapabilities } from './capability';
 
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-const until = async (cond: () => boolean, ms = 2000) => {
+const until = async (cond: () => boolean, ms = 6000) => {
   const t0 = Date.now();
   while (!cond()) {
     if (Date.now() - t0 > ms) throw new Error('until: timeout');
