@@ -85,7 +85,7 @@ declare class HotspotModule extends NativeModule<Events> {
   busStop(): void;
   busSend(payload: string): boolean;
   /** JS が止まっていてもネイティブが更新し続ける生存信号 */
-  busStatus(): { running: boolean; up: boolean; lastRxAt: number; connects: number; lastError: string | null };
+  busStatus(): { running: boolean; up: boolean; lastRxAt: number; aliveAt?: number; disconnectedAt?: number; connections?: number; disconnects?: number; connects: number; lastError: string | null };
   probe(host: string, port: number): Promise<{ ok: boolean; rttMs?: number; error?: string }>;
 }
 

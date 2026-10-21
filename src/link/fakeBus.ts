@@ -58,7 +58,7 @@ export function fakeBusPair(now: () => number = () => Date.now()) {
         }, 0);
         return true;
       },
-      status: (): BusStatus => ({ running: s.started, up: s.up, lastRxAt: s.lastRxAt, connects: s.connects, lastError: null }),
+      status: (): BusStatus => ({ running: s.started, up: s.up, lastRxAt: s.lastRxAt, aliveAt: s.lastRxAt, connects: s.connects, lastError: null }),
       onState: (cb) => (s.stateCbs.add(cb), () => s.stateCbs.delete(cb)),
       onMessage: (cb) => (s.msgCbs.add(cb), () => s.msgCbs.delete(cb)),
     };

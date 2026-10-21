@@ -7,6 +7,10 @@ import { DirectRetry, GuardTiming, guardTimingFor } from './directGuard';
 export interface LinkTimingConfig {
   /** 子機がエコー(親機の 9000)へ接続する間隔(ms) */
   hbIntervalMs: number;
+  /** バス(ZMTP heartbeat)の PING 間隔 ZMQ_HEARTBEAT_IVL(ms)。生存イベントもこの間隔で進む。既定 2000 */
+  busIvlMs: number;
+  /** バスの ZMQ_HEARTBEAT_TIMEOUT / TTL(ms)。この間 PONG が無ければ切断(DISCONNECTED)。既定 6000(IVL×3)。T_echo より十分小さく(TIMEOUT + IVL < T_echo) */
+  busTimeoutMs: number;
   /** T_echo: 生存信号が途切れてから「データ経路の異常」とみなすまで(ms)。既定 hb×3 */
   echoMs: number;
   /** T_direct: Direct の復帰を待つ上限(ms)。**親機**はここで Nearby を再開。既定 T_echo + 再接続回数×attemptMs */
@@ -40,15 +44,17 @@ export interface LinkTimingConfig {
 
 /** 親機→子機へ配る分(閾値の対応関係が崩れないよう、親機が正)。tick・join・Nearby 再試行は端末ごと */
 export type SharedTiming = Pick<LinkTimingConfig,
-  'hbIntervalMs' | 'echoMs' | 'directMs' | 'nearbyMs' | 'settleMs' | 'retryAttempts' | 'retryBackoffMs' | 'retryJoinTimeoutMs' | 'retryAttemptMs' | 'rejoinMs'>;
+  'hbIntervalMs' | 'busIvlMs' | 'busTimeoutMs' | 'echoMs' | 'directMs' | 'nearbyMs' | 'settleMs' | 'retryAttempts' | 'retryBackoffMs' | 'retryJoinTimeoutMs' | 'retryAttemptMs' | 'rejoinMs'>;
 
-export const SHARED_KEYS: (keyof SharedTiming)[] = ['hbIntervalMs', 'echoMs', 'directMs', 'nearbyMs', 'settleMs', 'retryAttempts', 'retryBackoffMs', 'retryJoinTimeoutMs', 'retryAttemptMs', 'rejoinMs'];
+export const SHARED_KEYS: (keyof SharedTiming)[] = ['hbIntervalMs', 'busIvlMs', 'busTimeoutMs', 'echoMs', 'directMs', 'nearbyMs', 'settleMs', 'retryAttempts', 'retryBackoffMs', 'retryJoinTimeoutMs', 'retryAttemptMs', 'rejoinMs'];
 
 type Scalar = Exclude<keyof LinkTimingConfig, 'retryBackoffMs'>;
 
 /** [下限, 上限](ms または回数) */
 export const TIMING_RANGES: Record<Scalar, [number, number]> = {
   hbIntervalMs: [1_000, 60_000],
+  busIvlMs: [500, 60_000],
+  busTimeoutMs: [1_500, 300_000],
   echoMs: [3_000, 600_000],
   directMs: [5_000, 3_600_000],
   nearbyMs: [6_000, 7_200_000],
@@ -68,6 +74,8 @@ const BACKOFF_RANGE: [number, number] = [100, 120_000];
 
 export const TIMING_DEFAULTS: LinkTimingConfig = {
   hbIntervalMs: 5_000,
+  busIvlMs: 2_000,
+  busTimeoutMs: 6_000,
   echoMs: 15_000,
   directMs: 150_000,
   nearbyMs: 165_000,
@@ -136,6 +144,15 @@ export function resolveTiming(input: Partial<LinkTimingConfig> = {}, o: ResolveO
     const fixed = out.directMs + out.echoMs;
     log(`T_nearby(${out.nearbyMs}) ≤ T_direct(${out.directMs}) → T_nearby を ${fixed} に補正(子機が親機より先に探索へ戻らないため)`);
     out.nearbyMs = fixed;
+  }
+  // バスの heartbeat: TIMEOUT ≥ IVL×2(PONG 1 回の取りこぼしで切らない)、TIMEOUT + IVL < T_echo(T_echo より先にバス自身が切れを知る)
+  if (out.busTimeoutMs < out.busIvlMs * 2) {
+    const fixed = out.busIvlMs * 2;
+    log(`bus TIMEOUT(${out.busTimeoutMs}) < IVL×2(${fixed}) → TIMEOUT を ${fixed} に補正`);
+    out.busTimeoutMs = fixed;
+  }
+  if (out.busTimeoutMs + out.busIvlMs >= out.echoMs) {
+    log(`注意: bus TIMEOUT(${out.busTimeoutMs}) + IVL(${out.busIvlMs}) が T_echo(${out.echoMs}) 以上: バスの切断検知が T_echo より遅い。T_echo を大きくするか TIMEOUT を小さく`);
   }
   const need = out.retryAttempts * out.retryAttemptMs;
   if (need > out.directMs - out.echoMs) log(`注意: 再接続 ${out.retryAttempts}回×${out.retryAttemptMs}ms=${need}ms が T_direct−T_echo(${out.directMs - out.echoMs}ms)に収まらない`);

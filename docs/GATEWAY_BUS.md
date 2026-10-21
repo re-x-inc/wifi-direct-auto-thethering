@@ -506,7 +506,7 @@ PR 4 より前は、バスは「つなぐだけ」(制御は Nearby のまま)�
 | トランスポート | 親機 Kotlin の WebSocket + subject 自作 | **ZeroMQ(jeromq 0.6.0、純 Java)。親機 ROUTER / 子機 DEALER の 1 対 1** | Kaz 指定。サーバーもクライアントもネイティブにでき、JS が止まっても接続・ping が続く(§5.3 の退避策を最初から採る) |
 | 子機クライアント | RN の WebSocket | **ネイティブ(Kotlin の BusEngine)**。JS は `busStart / busSend / busStatus` とイベントのみ | 同上。RN の WebSocket は背景で止まる懸念(§5.3)を避ける |
 | 認証 | HMAC チャレンジ(§7.2) | **同じ方式**を ZeroMQ の上のアプリ層で。`K_bus = HMAC(共有コード, "dh-bus/v1")` を JS が導き、鍵(hex)だけをネイティブに渡す。共有コードは Nearby ペアリングで両端末に保存済みのものをそのまま使える(新しい鍵交換は不要) | CURVE は「親機の公開鍵を子機が先に知る」配布が要る。PLAIN は平文。アプリ層 HMAC は §7.2 の設計のまま |
-| 生存信号 | echo と OR(§4.2) | 子機が `hbIntervalMs` ごとに ping、親機が pong。**認証済みフレームの最終受信時刻 `lastRxAt` をネイティブが更新**し、JS は tick で読む。ZMTP の heartbeat(`HEARTBEAT_IVL/TIMEOUT`)も有効にして死んだ接続を切る | ZMTP の heartbeat は切断を知らせるだけで「最後に受けた時刻」は API で取れない |
+| 生存信号 | echo と OR(§4.2) | **§12 で更新**: 生存確認は ZMTP heartbeat(IVL / TIMEOUT / TTL)+ socket monitor が主。ネイティブは「生きた/切れた」イベントと時刻(`aliveAt`)を出し、**最終時刻の保持は LinkGovernor**。アプリ層の ping/pong は保険として残す(理由は §12.2) | ZMTP の heartbeat は「最後に受けた時刻」を API で取れない。jeromq 0.6.0 の heartbeat timeout は経路が静かに死んでも発火しないことがある(§12.2) |
 | subject / pub-sub | `ctl.*` の subject(§6.1) | **使わない**。既存の `tether.*` の封筒(`Wire`)をそのまま運ぶ。フレームは `LinkSupervisor` と同じ `data/ack`(seq・epoch) | 第1段は運び先の差し替えだけ。subject 化は必要になってから |
 | 到達保証 | ack・再送(§6.3) | **JS の `BusControl` が持つ**(ZeroMQ は切断中の送信を失う。実測: 切断後に積んだ 1 件が再接続後に届かなかった) | ネイティブは運ぶだけにして、再送・順序・ttl を既存の LinkSupervisor と同じ意味に揃える |
 
@@ -529,7 +529,7 @@ PR 4 より前は、バスは「つなぐだけ」(制御は Nearby のまま)�
 
 ### 11.4 生存信号の抽象(Echo → バスへの移行)
 - `DataPath.busAt`(バスの最終受信時刻)を足し、`lastAliveAt(data, role)`(= Echo の最終時刻とバスの最終時刻の新しい方)を T_echo / T_direct の判定(`deriveOverall`)と governor の `alive` の入力にした。出どころが増えても(子機のネイティブ heartbeat など)ここへ足すだけ。
-- バス接続中は **子機の Echo(9000)への接続を省く**。JS の `heartbeatLoop` に加え、**ネイティブ heartbeat(`syncNativeHb` / `heartbeatStart`)も止める**(バスの `busAt` が hb×2.5 以内に新しい間)。バスが落ちて `busAt` が古くなれば、次の tick でネイティブ heartbeat を再開する。旧版の親機のときは従来どおり Echo。
+- バス接続中は **子機の Echo(9000)への接続を省く**。JS の `heartbeatLoop` に加え、**ネイティブ heartbeat(`syncNativeHb` / `heartbeatStart`)も止める**(§12 で変更: バスが認証済みの間は始めない・止める。バスの起動/切断の直後は hb×2 の間は結果待ちで Echo を始めない = ヒステリシス。切断が続けば再開)。旧版の親機のときは従来どおり Echo。
 - Bus を使うかは運び先の選択で決まる(Direct 稼働中で Nearby を止めている間、かつバスが認証済みになったことがあるとき)。Direct 中は常に Nearby を止めるので方式の条件は無い(keep 方式は廃止)。バス部品が無い・旧版の相手(`busPort` なし)では起動せず従来どおり Nearby。
 - 親機の ready: バスが認証済みになれば、Echo の回数による推定(wifi-result 未着時の救済)に頼らず子機を ready とみなす。Echo は引き続き推定の入力として動く。
 - Echo(9000)は **当面残す**(旧版互換・探針)。バスが実機で Echo 同等に切断を検知できると確認できたら、Echo を探針だけに縮める(第2段以降)。
@@ -539,3 +539,53 @@ PR 4 より前は、バスは「つなぐだけ」(制御は Nearby のまま)�
 - jeromq の Android での動作(minSdk 29、前面サービス下、画面オフ・Doze)。release ビルドの R8。**JVM(127.0.0.1)の単体テストでは認証・往復・ping・親機再起動からの復帰・無通信の検知を確認済み**。
 - 子機のバスが VPN 越しでなく Direct の Wi-Fi に出ること(プロセスの固定に依存)。
 - 親機の `p2p-*` インターフェース名での bind(機種により名前が違う場合は全インターフェースにフォールバック)。
+
+## 12. 生存確認を ZMTP heartbeat に(PR: feat/zmq-heartbeat)
+
+Kaz 指示: 「Echo(9000)を無くすのではなく、ZMQ の HeartBeat を使うようにしてください」。生存確認の手段を、Echo への定期 TCP 接続とアプリ層 ping/pong から、ZeroMQ 自身の ZMTP heartbeat に寄せる。**Echo のコードはこの PR では消さない**(§12.4 に廃止計画)。
+
+### 12.1 jeromq 0.6.0 の確認(jar のソースで)
+- `ZMQ.Socket` に `setHeartbeatIvl / setHeartbeatTimeout / setHeartbeatTtl / setHeartbeatContext` と getter がある。`BusEngine` は第1段から IVL=pingMs・TIMEOUT=TTL=timeoutMs を設定済み。
+- socket monitor は `Socket.monitor(addr, events)` + `ZMQ.Event.recv`。イベントは `CONNECTED(子機)/ACCEPTED(親機)/DISCONNECTED/…`。**`HANDSHAKE_SUCCEEDED` は 0.6.0 に無い**(`HANDSHAKE_PROTOCOL` のみ)ので、「認証済み」はアプリ層の H/C/A/K で判定する。
+- **制約の再確認**: ZMTP heartbeat は「最後に受けた時刻」を API で出さない(#23 の判断のとおり)。出るのは「接続が閉じた(DISCONNECTED)」だけ。
+
+### 12.2 設計(Kaz 追加方針の上で)
+- **時刻の保持は LinkGovernor**。ネイティブ(`BusEngine`)は「生きた/切れた」の事実と、その発生時刻だけを出す: `aliveAt`(生存イベントの時刻)・`disconnectedAt`・`connections`・`disconnects`、状態変化は `onBusState(up, reason)`。時刻は epoch ms(JS の `now` と同じ時計。ネイティブの `System.currentTimeMillis`。単調時計ではなく壁時計にしたのは、JS の now と直接比べるため)。JS は tick で読み、`Tether.noteAliveAt(gen, at, 'bus')` → `LinkGovernor.noteAliveAt(at)`(max。古い時刻へ戻さない。未来は now に丸める)へ渡す。JS が止まっていた間のイベントは、遅れて届いても添えられた時刻で更新される。画面・判定は `lastAliveAt`(`DataPath.aliveAt`)だけを読む。送り手(Echo・バス・ZMTP)に依存しない。
+- 案の判断: **(a) + (b) を採り、(c) アプリ層 P/O を保険として併用**。
+  - (a) 認証済みで接続中(monitor が数える接続が 1 以上で DISCONNECTED が無い)なら、IVL ごとに `aliveAt` を進める。
+  - (b) 認証済みのアプリ層フレーム(M / P / O)の受信でも `aliveAt` を進める。
+  - (c) の理由(実測): **jeromq 0.6.0 の heartbeat timeout は、経路が静かに死んでも(RST も FIN も来ない)発火しないことがある**。127.0.0.1 上の TCP 中継で通信を黙って捨てる実験(IVL=100ms・TIMEOUT=600ms、両側 heartbeat)では、大半の試行で 5 秒待っても DISCONNECTED が出なかった(IVL=500/TIMEOUT=1250 でも同様。IVL=1000/TIMEOUT=3000 の少数の試行では発火)。片側だけ heartbeat にすると、その側または相手側のどちらかは概ね検知する(15 回中 14 回)が確実ではない。発火するときは TIMEOUT どおり(約 600〜650ms)。この状態で (a) だけだと、死んだ経路を「生きている」と言い続けてしまう。そこで **ZMTP が切断を出さなくても、アプリ層の受信が TIMEOUT + IVL 途絶えたら `down(timeout)`** にし、(a) の `aliveAt` は「アプリ層の受信が新しい」ときだけ進める。アプリ層 P/O の間隔は IVL と同じ(子機が P、親機が O)。(実験用コードはコミットしていない。`BusEngineTest.silentPathDeath…` が同じ状況の回帰テスト。)
+  - つまり ZMTP heartbeat は「親機再起動・RST・FIN・多くの無通信」を即座に/TIMEOUT 以内に知らせる主経路、P/O は silent death の保険。実機で ZMTP だけで足りると確認できたら P/O を外せる(§12.4 の条件)。
+- 精度: `aliveAt` は最大 TIMEOUT 遅れの「その時点まで生きていた」。したがって **TIMEOUT + IVL < T_echo**(§12.3)。
+- 切断検知: 親機の再起動(子機側 DISCONNECTED → 再接続 → H からやり直し)、Wi-Fi 切断(経路が黙る → ZMTP timeout または P/O 保険)、子機の無通信(親機側で `down(timeout)` / `down(disconnected)`)を `BusEngineTest` で確認(`silentPathDeath…`・`hostRestart…`・`guestSilence…`・`guestStop…`)。
+- 再接続: 子機の `RECONNECT_IVL` を 500ms/上限 5s から **200ms/上限 3s** に短縮。切断中は H を送らない(接続が戻ってから 1 秒おき)。
+
+### 12.3 閾値の対応(`timing` に追加。外から設定可能)
+| 名前 | 設定名 | 既定 | 対応 |
+|---|---|---|---|
+| IVL | `busIvlMs` | 2s | `ZMQ_HEARTBEAT_IVL`。`aliveAt` もこの間隔で進む。P/O の間隔でもある |
+| TIMEOUT | `busTimeoutMs` | 6s (IVL×3) | `ZMQ_HEARTBEAT_TIMEOUT` = `ZMQ_HEARTBEAT_TTL`。この間 PONG が無ければ jeromq が切る |
+| 保険の判定 | (TIMEOUT + IVL) | 8s | アプリ層の受信がこれより古ければ `down(timeout)` |
+| T_echo | `echoMs`(既存) | 15s (hb×3) | 生存信号が途切れて「データ経路の異常」。**TIMEOUT + IVL(8s)< T_echo(15s)**: T_echo より先にバス自身が切れを知る。`busTimeoutMs + busIvlMs ≥ echoMs` なら警告ログ |
+
+補正: `busTimeoutMs < busIvlMs×2` は IVL×2 に補正。親機が正で、`busIvlMs / busTimeoutMs` も `tether.timing` で子機へ配る。`hbIntervalMs`(Echo の間隔)は従来どおり Echo 専用。
+
+### 12.4 Echo(9000)廃止の計画(この PR では実コードを消さない)
+前提: **b6 が実機で「バス + heartbeat だけで切断を検知できる」ことを確認してから**、別 PR で消す。
+1. 【確認】実機で §12.5 の手順(親機再起動・Wi-Fi 切断・子機の無通信で `down` が TIMEOUT 以内に出るか。画面オフ・Doze でも `aliveAt` が進むか)。ZMTP だけで検知できるなら保険の P/O を外す(別 PR)。
+2. 【PR A】子機の Echo を消す: `Heartbeat.kt`(ネイティブ heartbeat)・JS `heartbeatLoop`・`syncNativeHb`・`hbNative`・`busHoldsEcho`・`hbIntervalMs`/`hbScreenOffIntervalMs`/`hbWakeLock` の設定(互換のため受けて無視 → 次で削除)。バス未対応の相手(LOHS・旧版)には残す必要があるので、**LOHS でバスが動く(`LINK_LAYER.md` §6 の PR 5)まで、LOHS 経路では Echo を残す**。
+3. 【PR B】親機の Echo を消す: `EchoServer`(9000 の受付)・`onEchoAccept`・`DataPath.echoAt`・`inferReachFromEcho`。親機の ready は「バス認証済み」だけにする。
+4. 【PR C】到達確認 probe: 初回の Direct 到達確認(子機の `probe` = Echo への 1 回の接続)は、**バス接続の成立(認証済み)で置き換えられる**(バスは Direct の Wi-Fi 上で親機に TCP 到達し HMAC 認証まで通る = 到達確認より強い)。置き換え後は `DataPath.reach` を「バス認証済み」から導く。ただし LOHS・バスなしの組合せでは probe が要る(Echo ポートでなく SOCKS(1080)への接続に変える案)。
+5. 【PR D】`okAt`・`heartbeat` を DataPath から消し、`lastAliveAt` は `aliveAt` のみにする。`docs/LINK_STATE.md` の hb 行を削除。
+
+順序の根拠は `docs/LINK_LAYER.md` §6(PR 分割)と同じ: **Echo の廃止は LOHS のバス対応(PR 5)の後**。LOHS 経路の生存検知がバスで実機確認できるまで Echo は消さない。
+
+### 12.5 実機確認手順(b6 向け。ログタグ)
+親機・子機とも本 PR のビルドを入れ、Direct でバスをつなぐ。見るログ: `DH-BUS`(ネイティブ。`バス接続 reason=… connects=…` / `TCP 接続 connections=…` / `TCP 切断 connections=… disconnects=…` / `バス切断 reason=disconnected|timeout`)、`DH-LINK`(`バス接続(auth)` / `バス切断(…)` / `ネイティブのハートビート開始|停止(バス接続中は Echo を省く)`)。`linkSnapshot().path.lastAliveAt` と `path.bus`(authenticated / disconnected / off)を画面で見てもよい。
+1. 通常: 接続後 60 秒、`path.lastAliveAt` が IVL(2 秒)ごとに進み、`DH-HB start` が **バス接続の 1 回につき最大 1 回**(start → 約 1 秒で stop を繰り返さない)。
+2. 親機アプリの再起動: 子機に `TCP 切断` → `バス切断 reason=disconnected`(通常 1 秒以内)→ 親機の復帰後に `バス接続`。
+3. Wi-Fi 切断(親機の機内モード/子機の Wi-Fi オフ): 相手側に `バス切断` が **TIMEOUT(6 秒)+ IVL(2 秒)以内**に出るか。`reason=disconnected`(ZMTP が検知)か `timeout`(保険)かを控える(**`timeout` ばかりなら jeromq の heartbeat が実機でも発火していない**ので P/O を外せない)。
+4. 子機アプリを強制終了: 親機に `TCP 切断`(FIN/RST ならすぐ)。通信だけ止める場合は 3 と同じ。
+5. 画面オフ 10 分: `lastAliveAt` が進み続けるか、`バス切断` が出ないか。
+6. 切断後の復帰時間: `バス切断` から次の `バス接続` まで(RECONNECT_IVL 200ms〜3s)。
+7. 12:53 のログ(razr4/pixel5)の約 40 秒の復帰は、子機アプリの再起動(pid 631→4034)+ Nearby 経由の接続情報の再送 + `requestNetwork` の待ち(約 15 秒)が支配的で、バスの再接続間隔ではなかった。同じ操作でどこに時間がかかるかを `DH-P2P`/`DH-LINK` のタイムスタンプで確認。

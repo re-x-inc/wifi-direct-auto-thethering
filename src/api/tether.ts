@@ -1,7 +1,7 @@
 import { createLink } from '../link/session';
 import { directCreds, removeDirectCreds } from '../pairing/directCreds';
 import type { LinkSupervisor } from '../link/supervisor';
-import { DataPath, deriveOverall, initialDataPath, NearbyPhase, Overall } from '../link/dataPath';
+import { BusLinkState, DataPath, deriveOverall, initialDataPath, NearbyPhase, Overall } from '../link/dataPath';
 import type { DirectRetry } from '../link/directGuard';
 import { GuardAction, GuardEvent, nearbyShouldBeOff } from '../link/directGuard';
 import { LinkStateInfo } from '../link/stateLabels';
@@ -131,6 +131,8 @@ export class Tether {
   private busRunning = false;
   /** 今回の起動で、バスが一度でも認証済みになった(なるまでは運び先をバスにしない = 旧版の相手との互換) */
   private busSeenUp = false;
+  /** バスの状態(authenticated / disconnected / off)が最後に変わった時刻。Echo の再開のヒステリシス用 */
+  private busChangedAt = 0;
   private busKey: string | null = null;
   private busSelf: string | null = null;
   private offBusUp: (() => void) | null = null;
@@ -886,7 +888,7 @@ export class Tether {
     h.stopSocks();
     try { h.stopHotspot(); } catch {}
     this.nearbyDirectActive(false);
-    this.data = { ...this.data, group: null, echoAt: null, busAt: null, reach: null };
+    this.gov.forgetAlive(); this.data = { ...this.data, group: null, echoAt: null, busAt: null, aliveAt: null, reach: null };
     await h.stopDirect().catch(() => {});
     await this.p.sleep(1500);
     if (gen !== this.gen) return null;
@@ -1096,7 +1098,7 @@ export class Tether {
     if (gen !== this.gen) return;
     this.nearbyDirectActive(false);
     this.safeStopVpn();
-    this.data = { ...this.data, group: false, heartbeat: null, okAt: null, busAt: null };
+    this.gov.forgetAlive(); this.data = { ...this.data, group: false, heartbeat: null, okAt: null, busAt: null, aliveAt: null };
     this.stopBus('wifi-lost');
     this.gateway = null;
     this.set({ wifi: 'off', vpn: this.vpnHold ? 'held' : 'off' });
@@ -1231,6 +1233,42 @@ export class Tether {
     this.gnote(`timing role=${role} source=${Object.keys(saved).length ? 'config+保存した上書き' : 'config'} ${JSON.stringify(t)}`);
   }
 
+  /**
+   * 再接続専用: Direct の作り直しと Nearby 復帰の再試行を、LinkGovernor の遷移表に沿って始める(画面の「つなぎ直す」用)。
+   *  - 親機: Wi-Fi Direct の共有中なら rebuildDirect(接続情報の再送 → Nearby を閉じる → グループ再作成 → 子機を待つ。子機が戻らなければ表どおり Nearby を再開)。
+   *    共有していなければ shareNow()。
+   *  - 子機: Direct 稼働中(phase=direct)なら lost('manual') で retrying へ(保存済みの情報で再参加。尽きれば表どおり Nearby を再開)。
+   *  - すでに再接続中(retrying / rejoining)・停止中は何もしない(二重起動しない)。
+   * 戻り値 action: 'rebuild' | 'retry' | 'share' | 'none'(reason に理由)。Nearby や Direct を直接は触らず、必ず governor を通る。
+   */
+  async restartLink(): Promise<{ action: 'rebuild' | 'retry' | 'share' | 'none'; reason?: string }> {
+    const role = this.state.role;
+    const gen = this.gen;
+    if (!this.state.started || !role) return { action: 'none', reason: 'stopped' };
+    const phase = this.gov.phase;
+    if (phase === 'retrying' || phase === 'rejoining') {
+      this.gnote(`つなぎ直し要求: すでに再接続中(${phase})のため何もしない`);
+      return { action: 'none', reason: 'in-progress' };
+    }
+    if (role === 'host') {
+      if (this.suspendOk && this.shareMsg && this.shareMsg.method === 'WifiDirect' && this.state.share === 'on') {
+        this.gnote('つなぎ直し要求(親機): Direct を作り直す');
+        void this.rebuildDirect(gen).catch((e) => this.log('Direct 作り直しで例外: ' + (e?.message ?? e)));
+        return { action: 'rebuild' };
+      }
+      if (this.sharing) return { action: 'none', reason: 'in-progress' };
+      this.gnote('つなぎ直し要求(親機): 共有をやり直す');
+      await this.shareNow();
+      return { action: 'share' };
+    }
+    if (phase === 'direct') {
+      this.gnote('つなぎ直し要求(子機): Direct を再接続する');
+      this.guard(gen, { t: 'lost', reason: 'manual' });
+      return { action: 'retry' };
+    }
+    return { action: 'none', reason: `phase=${phase}` };
+  }
+
   /** 画面用: いまの状態(内部名・日本語ラベル・経過・次の遷移までの残り・試行回数)、遷移履歴、総合状態、データ経路、有効な設定値 */
   linkSnapshot(): LinkSnapshot {
     return this.gov.snapshot();
@@ -1356,10 +1394,10 @@ export class Tether {
     if (typeof h.heartbeatStart !== 'function' || typeof h.heartbeatStatus !== 'function') return false;
     const want = this.state.role === 'guest' && this.suspendOk && this.state.wifi === 'joined' && !!this.gateway;
     if (!want) { this.stopNativeHb('不要になった(Wi-Fi 未参加・停止)'); return false; }
-    // バスが生きていれば(ネイティブの ping/pong が新しい)Echo は省く。バス断(新しくなくなる)で次の tick から再開する
-    if (this.busFresh(this.hbMs())) {
+    // バスが認証済み(または起動/切断の直後で結果待ち)の間は Echo を始めない・止める。バス断が grace 続いたら再開する(ヒステリシス)
+    if (this.busHoldsEcho()) {
       this.stopNativeHb('バス接続中は Echo を省く');
-      return true; // 生存信号はバスの lastRxAt(ネイティブが更新)。JS が止まっていた間も数え直さない
+      return true; // 生存信号はバスの aliveAt イベント(ネイティブが更新)。JS が止まっていた間も数え直さない
     }
     const host = this.gateway as string;
     const port = this.lastPort;
@@ -1401,11 +1439,21 @@ export class Tether {
    * (いまはネイティブの Echo ハートビート。Direct 上のバスの ping に置き換わっても、ここへ at を渡すだけでよい)。
    * 新しい時刻なら true。
    */
-  private noteAliveAt(gen: number, at: number): boolean {
-    if (gen !== this.gen || at <= (this.data.okAt ?? 0)) return false;
-    this.data = { ...this.data, heartbeat: { ok: true, at }, okAt: at };
+  private noteAliveAt(gen: number, at: number, src: 'echo' | 'bus' = 'echo'): boolean {
+    if (gen !== this.gen) return false;
+    if (src === 'echo') {
+      if (at <= (this.data.okAt ?? 0)) return false;
+      this.data = { ...this.data, heartbeat: { ok: true, at }, okAt: at };
+    } else {
+      if (at <= (this.data.busAt ?? 0)) return false;
+      this.data = { ...this.data, busAt: at };
+    }
+    // 最終時刻の保持は LinkGovernor(max。古い時刻へは戻さない)。画面・判定はそこから反映した aliveAt だけを読む
+    this.gov.noteAliveAt(at);
+    this.data = { ...this.data, aliveAt: this.gov.lastAliveAt };
     this.guard(gen, { t: 'alive' });
-    this.gov.setAliveAt(at);
+    const kept = this.gov.lastAliveAt;
+    if (kept !== null) this.gov.setAliveAt(kept);
     if (this.gov.phase === 'nearby' && this.state.vpn === 'on' && !this.joining) this.guard(gen, { t: 'ready' });
     return true;
   }
@@ -1436,7 +1484,7 @@ export class Tether {
       if (gen !== this.gen) return;
       if (!this.suspendOk || this.state.wifi !== 'joined' || !this.gateway) { lastAt = this.p.now(); continue; }
       // バスが生きていれば(ネイティブの ping/pong が新しい)Echo は省く。バス接続が生存信号を兼ねる。旧版の親機・バス断のときは従来どおり Echo
-      if (this.busFresh(hb)) { lastAt = this.p.now(); continue; }
+      if (this.busHoldsEcho()) { lastAt = this.p.now(); continue; }
       if (this.hbNative) { lastAt = this.p.now(); continue; } // ネイティブが送っている間は JS からは送らない
       const gap = this.p.now() - lastAt > hb * 2.5;
       let res = await this.hotspot.probe(this.gateway, this.lastPort);
@@ -1469,9 +1517,8 @@ export class Tether {
   }
 
   private busTiming(): { pingMs: number; timeoutMs: number } {
-    const hb = this.hbMs();
-    // ping は hb ごと。無通信の切断は hb×2.5(T_echo = hb×3 より先にバス自身が切れを知る)
-    return { pingMs: hb, timeoutMs: Math.round(hb * 2.5) };
+    // ZMTP heartbeat: IVL / TIMEOUT(= TTL)は timing(busIvlMs / busTimeoutMs)。T_echo より先にバス自身が切れを知る
+    return { pingMs: this.timing.busIvlMs, timeoutMs: this.timing.busTimeoutMs };
   }
 
   /** 親機: Direct のグループができたあとにバスを待ち受けさせる。返す番号は tether.wifi の busPort に載せる(null = 使わない) */
@@ -1484,6 +1531,7 @@ export class Tether {
       const bound = bus.start({ host: true, selfId: this.busSelf, peerId: this.peerId, keyHex: this.busKey, addr: null, port: BUS_PORT, ...t });
       this.busRunning = true;
       this.busSeenUp = false;
+      this.setBusState('disconnected');
       this.log(`[DH-BUS] 待ち受け ${bound}:${BUS_PORT}`);
       return BUS_PORT;
     } catch (e: any) {
@@ -1502,6 +1550,7 @@ export class Tether {
       const bound = bus.start({ host: false, selfId: this.busSelf, peerId: this.peerId, keyHex: this.busKey, addr: gateway, port: busPort, ...this.busTiming() });
       this.busRunning = true;
       this.busSeenUp = false;
+      this.setBusState('disconnected');
       this.log(`[DH-BUS] 接続開始 ${bound}`);
     } catch (e: any) {
       this.busRunning = false;
@@ -1513,7 +1562,7 @@ export class Tether {
     if (!this.busRunning) return;
     this.busRunning = false;
     this.busSeenUp = false;
-    this.data = { ...this.data, busAt: null };
+    this.data = { ...this.data, busAt: null, bus: 'off' };
     try { this.p.bus?.stop(); } catch {}
     this.log(`[DH-BUS] 停止(${why})`);
     this.ctl?.reconcile();
@@ -1523,11 +1572,13 @@ export class Tether {
     if (gen !== this.gen) return;
     if (up) {
       this.busSeenUp = true;
-      this.data = { ...this.data, busAt: this.p.now() };
+      this.setBusState('authenticated');
       this.gnote(`バス接続(${reason})`);
+      this.noteAliveAt(gen, this.p.now(), 'bus');
       this.aliveFromBus(gen, role);
       this.ctl?.reconcile();
     } else {
+      this.setBusState('disconnected');
       this.gnote(`バス切断(${reason}): 溜まった分は再接続後に送る。Nearby は止めたまま、バスの再接続を先に待つ`);
       // 生存信号は更新しない。時間が経っても戻らなければ T_echo / T_direct の判定が進む(Nearby に戻るのは governor の判断だけ)
     }
@@ -1536,7 +1587,6 @@ export class Tether {
 
   /** バスの生存信号が入った: governor に alive を渡し、親機は「子機が Direct に届いた」、子機は VPN が張れていれば ready を出す */
   private aliveFromBus(gen: number, role: TetherRole): void {
-    this.guard(gen, { t: 'alive' });
     if (role === 'host') this.hostPeerReady('bus');
     else if (this.gov.phase === 'nearby' && this.state.vpn === 'on' && !this.joining) this.guard(gen, { t: 'ready' });
   }
@@ -1546,16 +1596,30 @@ export class Tether {
     if (!this.busRunning || !this.p.bus || !this.state.role) return;
     let st;
     try { st = this.p.bus.status(); } catch { return; }
-    if (!st.running || !st.up || st.lastRxAt <= (this.data.busAt ?? 0)) return;
-    this.data = { ...this.data, busAt: st.lastRxAt };
-    this.gov.setAliveAt(st.lastRxAt); // JS が止まっていた間も、ネイティブが受けた時刻を基準にする
-    this.aliveFromBus(gen, this.state.role);
+    if (!st.running) return;
+    // ネイティブの up と JS の見ている状態がずれたら合わせる(イベントの取りこぼし対策)
+    const nowState: BusLinkState = st.up ? 'authenticated' : 'disconnected';
+    if (nowState !== this.data.bus) { this.setBusState(nowState); this.set({}); }
+    if (!st.up) return;
+    // 生存イベントの時刻はネイティブの値(JS が止まっていて遅れて届いても、その時刻で更新する)
+    if (this.noteAliveAt(gen, st.aliveAt ?? st.lastRxAt, 'bus')) this.aliveFromBus(gen, this.state.role);
   }
 
-  /** バスが生きていて、生存信号が新しい(Echo を省いてよい) */
-  private busFresh(hb: number): boolean {
-    const at = this.data.busAt;
-    return this.busRunning && this.busSeenUp && at !== null && this.p.now() - at < hb * 2.5;
+  private setBusState(s: BusLinkState): void {
+    if (this.data.bus === s) return;
+    this.busChangedAt = this.p.now();
+    this.data = { ...this.data, bus: s };
+  }
+
+  /**
+   * Echo を始めない/止めてよいか。バスが認証済みの間は常に true(生存信号はバスの aliveAt)。
+   * 起動直後・切断直後は grace(hb×2)のあいだ true のまま(結果待ち。tick ごとに Echo が start/stop するのを防ぐヒステリシス)。
+   * 切断が grace 続いたら false(Echo を再開)。
+   */
+  private busHoldsEcho(): boolean {
+    if (!this.busRunning) return false;
+    if (this.data.bus === 'authenticated') return true;
+    return this.p.now() - this.busChangedAt < this.hbMs() * 2;
   }
 
   private onDirectGroup(gen: number, e: { up: boolean; clients: number; appInitiated?: boolean }): void {
@@ -1572,7 +1636,8 @@ export class Tether {
   private onEchoAccept(gen: number): void {
     if (gen !== this.gen) return;
     const now = this.p.now();
-    this.data = { ...this.data, echoAt: now };
+    this.gov.noteAliveAt(now);
+    this.data = { ...this.data, echoAt: now, aliveAt: this.gov.lastAliveAt };
     this.echoFirstAt ??= now;
     this.echoCount++;
     this.guard(gen, { t: 'alive' });
@@ -1634,7 +1699,7 @@ export class Tether {
     this.nearbySuspended = false;
     this.gov.markNearbyStopped(false);
     this.nearbyDirectActive(false);
-    this.data = { ...this.data, echoAt: null, busAt: null };
+    this.gov.forgetAlive(); this.data = { ...this.data, echoAt: null, busAt: null, aliveAt: null };
     this.gnote(`Nearby を再開(理由=${reason}, 停止中だった=${was}, group=${this.data.group}) → 広告・探索へ`);
     const go = () => {
       if (gen !== this.gen || seq !== this.suspendSeq || this.nearbySuspended) return;

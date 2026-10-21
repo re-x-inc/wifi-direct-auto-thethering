@@ -1,5 +1,6 @@
 import type { NearbyApi } from '../link/nearbyTransport';
-import type { DataPath, NearbyPhase, Overall } from '../link/dataPath';
+import type { BusLinkState, DataPath, NearbyPhase, Overall } from '../link/dataPath';
+export type { BusLinkState };
 import type { LinkTimingConfig } from '../link/timingConfig';
 import type { LinkStateInfo } from '../link/stateLabels';
 import type { Options as LinkTiming, SendOptions } from '../link/supervisor';

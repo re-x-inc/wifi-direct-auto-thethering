@@ -30,6 +30,8 @@ Wi-Fi 切断・グループ消滅のように切れたと確定した場合は�
 | 名前 | 設定名(`TetherConfig.timing.*`) | 既定 | 意味 | 総合状態 |
 |---|---|---|---|---|
 | hb | `hbIntervalMs` | 5s | 子機がエコー(親機の 9000)へ接続する間隔。親機はこの接続の有無で子機の生存を見る | |
+| bus IVL | `busIvlMs` | 2s | バスの ZMTP heartbeat の PING 間隔(`ZMQ_HEARTBEAT_IVL`)。バスの生存イベントもこの間隔 | |
+| bus TIMEOUT | `busTimeoutMs` | 6s (IVL×3) | `ZMQ_HEARTBEAT_TIMEOUT` / `TTL`。この間 PONG が無ければ切断。**TIMEOUT + IVL < T_echo** にする(T_echo より先にバス自身が切れを知る) | |
 | T_echo | `echoMs` | 15s (hb×3) | 生存信号が途切れた → データ経路の異常。Nearby は止めたまま Direct の復帰を試す(再接続 最大3回) | degraded |
 | T_direct | `directMs` | 150s (T_echo + 3×45s) | ここまでに戻らなければ Direct を諦める。**親機**はここで Nearby を再開(広告・探索) | disconnected |
 | T_nearby | `nearbyMs` | 165s (T_direct + T_echo) | **子機**はここで Nearby の探索を始める。親機の再開(T_direct)より 15 秒後 | disconnected |
@@ -239,7 +241,7 @@ Direct 稼働中に送れるのは echo 上の heartbeat だけ。それ以外�
 | direct-rebuilding | Direct を作り直しています | rejoining | rejoin |
 
 `LinkSnapshot`: `state`(name / label / phase / enteredAt / elapsedSec / waiting{for, deadlineAt(epoch ms), remainingMs} / attempt{n,max})、`overall`、
-`path`(nearby up|down|suspended / group / echoAt / reach / heartbeat)、`history`(直近 50 件の遷移: at / from / to / event / reason。SSID・パス・共有コードは含まない)、`timing`(有効な設定値と状態機械の時間)。
+`path`(nearby up|down|suspended / group / echoAt / reach / heartbeat / **lastAliveAt**(LinkGovernor が保持する最終生存時刻。無ければ null)/ **bus**(`authenticated` 認証済み・`disconnected` 切れている・`off` 使っていない))と `data`(state.data と同じ。`aliveAt` / `bus` を含む)、`history`(直近 50 件の遷移: at / from / to / event / reason。SSID・パス・共有コードは含まない)、`timing`(有効な設定値と状態機械の時間)。
 
 画面の想定: ホームの接続行 = `state.label` + `overall`(色)/ 待つ画面 = `label` と `waiting.deadlineAt` のカウントダウン、再接続中は `attempt` / 診断画面 = `history` と `path`・`timing` の一覧。
 
@@ -257,5 +259,5 @@ Direct 稼働中は Nearby を止めるので、`tether.send` などのアプリ
 
 - **バス断**: Nearby は再開しない(再接続が先)。ネイティブが再接続を続け、認証完了で未確認を seq 順に再送。受け手は (epoch, seq) で重複排除。
 - **Nearby への縮退**: governor が Nearby を再開した(T_direct・再接続の使い切り)、または子機が Wi-Fi 切断でバスを止めたとき、バスの未確認を送信順のまま Nearby の送信へ移す。バスの切断自体は governor に通知しない(生存信号が途絶えることで T_echo → T_direct が進む)。
-- **生存信号**: `lastAliveAt` = Echo(親機=最後の受付、子機=最後の成功)とバス(ネイティブが更新する `lastRxAt`)の新しい方。T_echo / T_direct の判定と governor の `alive` の入力。バス接続中は子機は Echo(JS の heartbeat もネイティブ heartbeat も)を省き、バス断で再開する。Echo は当面残す(旧版互換)。親機はバス認証済みで子機を ready とみなす(Echo 回数の推定は Echo 経路の救済として残る)。
+- **生存信号**: 生存確認はバスの **ZMTP heartbeat**(`ZMQ_HEARTBEAT_IVL / TIMEOUT / TTL`)+ socket monitor。ZMTP は「最後に受けた時刻」を出さないので、ネイティブは「生きた/切れた」イベントと**イベントの時刻**(`aliveAt`)だけを出す。**生存信号の最終時刻(`lastAliveAt`)は LinkGovernor が保持する**(`LinkGovernor.noteAliveAt(at)` が唯一の入口。max を取り古い時刻へは戻さない。JS が止まっていた間のイベントも、遅れて届いた時点で添えられた時刻で更新)。送り手(Echo・バス・ZMTP)に依存しない。画面・判定(T_echo / T_direct の `deriveOverall`・governor の `alive`)は `lastAliveAt`(`DataPath.aliveAt` / `linkSnapshot().path.lastAliveAt`)だけを読む。バス認証済みの間は子機は Echo(JS の heartbeat もネイティブ heartbeat も)を始めず、切断が hb×2 続いたら再開する(ヒステリシス)。詳細・実測・Echo 廃止計画は GATEWAY_BUS.md §12。Echo は当面残す(旧版互換)。親機はバス認証済みで子機を ready とみなす(Echo 回数の推定は Echo 経路の救済として残る)。
 - ログ: `[DH-LINK] 制御メッセージの運び先: …`、`[DH-LINK] バス接続/切断(理由)`、`[DH-BUS]`(TS 側)、ネイティブは logcat/診断の `DH-BUS`。

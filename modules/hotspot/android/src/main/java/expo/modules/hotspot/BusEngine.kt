@@ -13,19 +13,27 @@ import javax.crypto.spec.SecretKeySpec
 
 /**
  * Direct 上の制御メッセージバス(ZeroMQ = jeromq、純 Java)。親機 = ROUTER(bind)、子機 = DEALER(connect)の 1 対 1。
- * Android にも JS にも依存しない(JVM の単体テストで動く)。接続の保持・認証・ping/pong はここ(ネイティブのスレッド)で行い、
- * JS が止まっても生存信号(lastRxAt)は更新され続ける。JS は lastRxAt を読むだけ。
+ * Android にも JS にも依存しない(JVM の単体テストで動く)。接続の保持・認証・生存確認はここ(ネイティブのスレッド)で行う。
+ *
+ * 生存確認 = ZMTP 3.1 の heartbeat(ZMQ_HEARTBEAT_IVL / TIMEOUT / TTL)+ socket monitor(CONNECTED / ACCEPTED / DISCONNECTED)が主。
+ *   ZMTP heartbeat は「最後に受けた時刻」を出さない。無応答が TIMEOUT 続けば jeromq が接続を閉じ monitor に DISCONNECTED が出る
+ *   (親機の再起動・RST・FIN・多くの無通信は即座に/TIMEOUT 以内にこれで分かる)。
+ *   ただし jeromq 0.6.0 の heartbeat timeout は、経路が静かに死んでも発火しないことがある(実測: 両側 heartbeat・IVL100/TIMEOUT600 で
+ *   約 6 割の接続が 5 秒以上切れなかった。BusEngineTest / 仕様は docs/GATEWAY_BUS.md)。そこで **背後の保険** として
+ *   アプリ層の P/O を残す(送受信とも IVL ごと。判定は TIMEOUT + IVL)。P/O は時刻の取得源でもある。
+ *   「生きている」イベントの時刻 aliveAt は、接続中(DISCONNECTED 無し)かつ保険の受信が新しいあいだ IVL ごとに進む。
+ *   時刻の保持・max での更新・判定は JS の LinkGovernor が持つ。ここは「生きた/切れた」の事実と、その時刻だけを出す。
  *
  * 線の上(ZMQ の 1 フレーム = UTF-8 文字列。JSON パーサを使わない行形式):
  *   H:<guestId>            子機 → 親機  認証の開始
  *   C:<nS>                 親機 → 子機  チャレンジ(接続ごとの乱数)
  *   A:<nC>:<tagC>          子機 → 親機  tagC = HMAC(K, "c|nS|nC|guestId|hostId")
  *   K:<tagS>               親機 → 子機  tagS = HMAC(K, "s|nS|nC|guestId|hostId")(子機が親機を確認)
- *   P / O                  ping / pong(認証後。どちらの受信でも lastRxAt を更新)
  *   R                      親機 → 子機  未認証のフレームを受けた(親機が再起動した等) → 子機は H からやり直す
+ *   P / O                  ping / pong(認証後。ZMTP heartbeat の保険。受信で lastRxAt / aliveAt を更新)
  *   M:<payload>            アプリのメッセージ(認証後のみ受け付ける。payload は JS が作る文字列)
  * 鍵 K は JS が「ペアの共有コード」から導いた値(HMAC(secret, "dh-bus/v1"))を hex で受け取る。共有コード自体は渡さない。
- * ZMTP の heartbeat(HEARTBEAT_IVL / TIMEOUT)も有効にして、TCP が静かに死んだ接続を切る。再接続は jeromq(RECONNECT_IVL)。
+ * 再接続は jeromq(RECONNECT_IVL)。heartbeat は pingMs = IVL、timeoutMs = TIMEOUT = TTL。
  * メッセージの到達保証(ack・再送・順序・ttl)は持たない: 切断中に積んだ分は失われうるので、JS 側(BusControl)が持つ。
  */
 class BusEngine(
@@ -49,6 +57,14 @@ class BusEngine(
   )
 
   @Volatile var lastRxAt = 0L; private set
+  /** 直近の「生きている」イベントの時刻(epoch ms、0 = まだ無い)。認証済みで接続中のあいだ IVL ごとに進む。切断中は進まない */
+  @Volatile var aliveAt = 0L; private set
+  /** 直近の切断イベントの時刻(0 = まだ無い) */
+  @Volatile var disconnectedAt = 0L; private set
+  /** monitor が数えた、いまの TCP 接続の数(親機は子機の再接続の途中で 2 になりうる) */
+  @Volatile var connections = 0; private set
+  /** heartbeat の timeout などで jeromq が接続を閉じた回数(切断イベントの数) */
+  @Volatile var disconnects = 0; private set
   @Volatile var up = false; private set
   @Volatile var connects = 0; private set
   @Volatile var lastError: String? = null; private set
@@ -59,6 +75,7 @@ class BusEngine(
   private var ctx: ZContext? = null
   private var thread: Thread? = null
   private var wakeTx: ZMQ.Socket? = null
+  private var monRx: ZMQ.Socket? = null
   private val wakeLock = Any()
   private val rnd = SecureRandom()
   private val hostId get() = if (cfg.host) cfg.selfId else cfg.peerId
@@ -84,6 +101,11 @@ class BusEngine(
     tx.connect(wakeName)
     wakeTx = tx
     val sock = c.createSocket(if (cfg.host) SocketType.ROUTER else SocketType.DEALER)
+    val monName = "inproc://bus-mon-${System.identityHashCode(this)}"
+    sock.monitor(monName, ZMQ.EVENT_CONNECTED or ZMQ.EVENT_ACCEPTED or ZMQ.EVENT_DISCONNECTED)
+    val mon = c.createSocket(SocketType.PAIR)
+    mon.connect(monName)
+    monRx = mon
     sock.heartbeatIvl = cfg.pingMs
     sock.heartbeatTimeout = cfg.timeoutMs
     sock.heartbeatTtl = cfg.timeoutMs
@@ -98,8 +120,8 @@ class BusEngine(
         sock.bind("tcp://$bound:${cfg.port}")
       } else {
         sock.identity = guestId.toByteArray(Charsets.UTF_8)
-        sock.reconnectIVL = 500
-        sock.reconnectIVLMax = 5_000
+        sock.reconnectIVL = 200
+        sock.reconnectIVLMax = 3_000
         bound = "${cfg.addr}:${cfg.port}"
         sock.connect("tcp://$bound")
       }
@@ -110,7 +132,7 @@ class BusEngine(
       throw e
     }
     boundTo = bound
-    val t = Thread({ loop(sock, wakeRx) }, "dh-bus")
+    val t = Thread({ loop(sock, wakeRx, mon) }, "dh-bus")
     t.isDaemon = true
     thread = t
     t.start()
@@ -137,17 +159,24 @@ class BusEngine(
     synchronized(wakeLock) { try { wakeTx?.send("w", ZMQ.DONTWAIT) } catch (_: Throwable) {} }
   }
 
-  private fun loop(sock: ZMQ.Socket, wakeRx: ZMQ.Socket) {
+  private fun loop(sock: ZMQ.Socket, wakeRx: ZMQ.Socket, mon: ZMQ.Socket) {
     val c = ctx!!
-    val poller = c.createPoller(2)
+    val poller = c.createPoller(3)
     poller.register(wakeRx, ZMQ.Poller.POLLIN)
     poller.register(sock, ZMQ.Poller.POLLIN)
-    var lastPingAt = 0L
+    poller.register(mon, ZMQ.Poller.POLLIN)
     var lastHiAt = 0L
+    var lastPingAt = 0L
     try {
       while (running.get()) {
         poller.poll(250)
         if (poller.pollin(0)) { while (wakeRx.recv(ZMQ.DONTWAIT) != null) { /* drain */ } }
+        // 接続イベントを先に処理する(切断 → 再接続 → 新しい H の順に見るため)
+        while (true) {
+          val ev = ZMQ.Event.recv(mon, ZMQ.DONTWAIT) ?: break
+          onMonitor(ev.event, sock)
+          lastHiAt = 0
+        }
         if (poller.pollin(1)) {
           while (true) {
             val m = ZMsg.recvMsg(sock, ZMQ.DONTWAIT) ?: break
@@ -160,15 +189,15 @@ class BusEngine(
           val s = outbox.poll() ?: break
           if (up) sendRaw(sock, s)
         }
-        if (cfg.host) {
-          if (authed && now - lastRxAt > cfg.timeoutMs) setDown("timeout", sock)
-        } else {
-          if (up) {
-            if (now - lastPingAt >= cfg.pingMs) { sendRaw(sock, "P"); lastPingAt = now }
-            if (now - lastRxAt > cfg.timeoutMs) { setDown("timeout", sock); lastHiAt = 0 }
-          } else if (now - lastHiAt >= 1_000) {
-            sendRaw(sock, "H:$guestId"); lastHiAt = now
-          }
+        // 生存イベント: 認証済みで接続中(heartbeat timeout の切断が無い)なら、IVL ごとに「生きている」を進める
+        if (up && connections > 0) {
+          if (!cfg.host && now - lastPingAt >= cfg.pingMs) { sendRaw(sock, "P"); lastPingAt = now }
+          // 保険: ZMTP が切断を出さなくても、アプリ層の受信が TIMEOUT + IVL 途絶えたら切る
+          if (now - lastRxAt > cfg.timeoutMs + cfg.pingMs) setDown("timeout", sock)
+          else if (now - aliveAt >= cfg.pingMs) aliveAt = now
+        }
+        if (!cfg.host && !up && connections > 0 && now - lastHiAt >= 1_000) {
+          sendRaw(sock, "H:$guestId"); lastHiAt = now
         }
       }
     } catch (e: Throwable) {
@@ -176,6 +205,7 @@ class BusEngine(
       log("バスのループが異常終了: $lastError")
     } finally {
       try { poller.close() } catch (_: Throwable) {}
+      monRx = null
       val was = up
       up = false
       try { c.close() } catch (_: Throwable) {}
@@ -196,10 +226,23 @@ class BusEngine(
     }
   }
 
+  /** socket monitor のイベント。CONNECTED(子機)/ACCEPTED(親機)= 接続が増えた、DISCONNECTED = 切れた(heartbeat timeout を含む) */
+  private fun onMonitor(event: Int, sock: ZMQ.Socket) {
+    val now = clock()
+    when (event) {
+      ZMQ.EVENT_CONNECTED, ZMQ.EVENT_ACCEPTED -> { connections++; log("TCP 接続 connections=$connections") }
+      ZMQ.EVENT_DISCONNECTED -> {
+        connections = maxOf(0, connections - 1); disconnects++; disconnectedAt = now
+        log("TCP 切断 connections=$connections disconnects=$disconnects")
+        if (connections == 0) setDown("disconnected", sock)
+      }
+    }
+  }
+
   private fun setUp(reason: String) {
     if (up) return
     up = true; connects++
-    lastRxAt = clock()
+    lastRxAt = clock(); aliveAt = lastRxAt
     log("バス接続 reason=$reason connects=$connects")
     onState(true, reason)
   }
@@ -250,10 +293,9 @@ class BusEngine(
       if (peerIdentity != null && id.contentEquals(peerIdentity!!)) sendRaw(sock, "R")
       return
     }
-    lastRxAt = now
+    lastRxAt = now; aliveAt = now
     when {
       s == "P" -> sendRaw(sock, "O")
-      s == "O" -> {}
       s.startsWith("M:") -> onMessage(s.substring(2))
     }
   }
@@ -281,10 +323,9 @@ class BusEngine(
       s == "R" -> { if (up) setDown("reauth", sock) }
       !up -> {}
       else -> {
-        lastRxAt = clock()
+        lastRxAt = clock(); aliveAt = lastRxAt
         when {
           s == "P" -> sendRaw(sock, "O")
-          s == "O" -> {}
           s.startsWith("M:") -> onMessage(s.substring(2))
         }
       }
