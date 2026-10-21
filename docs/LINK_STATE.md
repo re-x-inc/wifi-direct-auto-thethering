@@ -268,5 +268,5 @@ Direct 稼働中は Nearby を止めるので、`tether.send` などのアプリ
 
 - **バス断**: Nearby は再開しない(再接続が先)。ネイティブが再接続を続け、認証完了で未確認を seq 順に再送。受け手は (epoch, seq) で重複排除。
 - **Nearby への縮退**: governor が Nearby を再開した(T_direct・再接続の使い切り)、または子機が Wi-Fi 切断でバスを止めたとき、バスの未確認を送信順のまま Nearby の送信へ移す。バスの切断自体は governor に通知しない(生存信号が途絶えることで T_echo → T_direct が進む)。
-- **生存信号**: `lastAliveAt` = Echo(親機=最後の受付、子機=最後の成功)とバス(ネイティブが更新する `lastRxAt`)の新しい方。T_echo / T_direct の判定と governor の `alive` の入力。バス接続中は子機は Echo を省く。Echo は当面残す(旧版互換)。
+- **生存信号**: `lastAliveAt` = Echo(親機=最後の受付、子機=最後の成功)とバス(ネイティブが更新する `lastRxAt`)の新しい方。T_echo / T_direct の判定と governor の `alive` の入力。バス接続中は子機は Echo(JS の heartbeat もネイティブ heartbeat も)を省き、バス断で再開する。Echo は当面残す(旧版互換)。バスを使うのは実効方式が suspend のときだけ。親機はバス認証済みで子機を ready とみなす(Echo 回数の推定は Echo 経路の救済として残る)。
 - ログ: `[DH-LINK] 制御メッセージの運び先: …`、`[DH-LINK] バス接続/切断(理由)`、`[DH-BUS]`(TS 側)、ネイティブは logcat/診断の `DH-BUS`。
