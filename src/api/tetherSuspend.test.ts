@@ -212,3 +212,16 @@ test('onNearbyError: Nearby のエラーイベントを読み取り専用で購�
   f.net.guest.emit('onError', { op: 'discover', code: 8012 });
   assert.deepEqual(got, [8007]);
 });
+
+test('親機 suspend・子機 keep(方式不一致): 子機は heartbeat を送らないので、親機は Echo が無くても到達確認 OK で connected のまま(Nearby も止めない)', async () => {
+  const f = await pairedFakes();
+  const hostT = new Tether(f.host.platform, SUSPEND);
+  const guestT = new Tether(f.guest.platform, { ...SUSPEND, nearbyWhileDirect: 'keep' as const });
+  await hostT.start(); await guestT.start();
+  await until(() => guestT.getState().vpn === 'on', 3000, 'vpn');
+  await until(() => hostT.getState().overall === 'connected', 3000, 'host connected');
+  await wait(400); // T_echo(60ms)を十分に超える。エコーは一度も来ない
+  assert.equal(hostT.getState().overall, 'connected');
+  assert.equal(f.net.host.suspendCount + f.net.guest.suspendCount, 0);
+  hostT.stop(); guestT.stop();
+});
