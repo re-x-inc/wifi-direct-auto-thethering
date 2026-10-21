@@ -28,8 +28,9 @@ async function setup(cfg: object = SUSPEND, beforeStart?: (f: Awaited<ReturnType
   const hostT = new Tether(f.host.platform, cfg);
   const guestT = new Tether(f.guest.platform, cfg);
   // ネイティブの ping/pong の代わり(バスが up の間は生存の時刻を進める)
-  const pulseTimer = setInterval(() => { if (f.bus?.isUp()) f.bus.pulse(); }, 10);
-  return { ...f, hostT, guestT, cleanup: () => { clearInterval(pulseTimer); hostT.stop(); guestT.stop(); } };
+  let pulse = true;
+  const pulseTimer = setInterval(() => { if (pulse && f.bus?.isUp()) f.bus.pulse(); }, 10);
+  return { ...f, hostT, guestT, stopPulse: () => { pulse = false; }, cleanup: () => { clearInterval(pulseTimer); hostT.stop(); guestT.stop(); } };
 }
 
 async function established(c: Awaited<ReturnType<typeof setup>>) {
@@ -144,6 +145,7 @@ test('親機: グループ消滅 → Nearby は止めたまま固定グループ
   const c = await setup();
   await established(c);
   const direct0 = c.host.calls.filter((x) => x === 'startDirect').length;
+  c.stopPulse(); // グループが消えたら、バスの生存信号も来ない
   c.host.emitGroup({ up: false, clients: 0 });
   await until(() => c.host.calls.filter((x) => x === 'startDirect').length > direct0, 2000, 'recreate');
   await wait(100);
