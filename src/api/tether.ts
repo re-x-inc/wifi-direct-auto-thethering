@@ -14,6 +14,7 @@ import { InternetConfig, InternetMonitor } from '../link/internetMonitor';
 import { NativeProbeRunner } from './internetProbe';
 import { Carrier, RoutedControl, SendReport } from '../link/controlRouter';
 import type { NearbyApi } from '../link/nearbyTransport';
+import { formatResumeEta, isResumeWaitingName, shouldLogResumeEta } from '../link/resumeEta';
 import { Confirm, Found, PairingResult, PairingSession } from '../pairing/pairing';
 import { clearDirectCreds } from '../pairing/forget';
 import { getIdentity, PairStore } from '../pairing/store';
@@ -147,6 +148,8 @@ export class Tether {
   private resumedBecause: string | null = null;
   private since = 0;
   private nearbySuspended = false;
+  /** 再開待ちログを最後に出した時刻(待ちの外では null) */
+  private resumeEtaLogAt: number | null = null;
   /** suspend / resume の競合を避ける番号(進行中の suspend は、番号が変わったら取り消す) */
   private suspendSeq = 0;
   private data: DataPath = initialDataPath();
@@ -1458,6 +1461,17 @@ export class Tether {
     else if (a.type === 'retry') void this.runRetry(gen, a.reason).catch((e) => this.log('Direct 再接続で例外: ' + (e?.message ?? e)));
   }
 
+  /** Nearby 再開待ち(retrying / 作り直し中)の間、残り秒を定期的に DH-LINK へ出す。方針・遷移は変えない */
+  private logResumeEta(): void {
+    const ls = this.state.linkState;
+    const w = ls?.waiting;
+    if (!ls || !w || !isResumeWaitingName(ls.name)) { this.resumeEtaLogAt = null; return; }
+    const now = this.p.now();
+    if (!shouldLogResumeEta(this.resumeEtaLogAt, now)) return;
+    this.resumeEtaLogAt = now;
+    this.gnote(formatResumeEta(w.remainingMs, this.retry?.reason ?? null, this.retry ? this.retry.attempt : null));
+  }
+
   private async guardLoop(gen: number): Promise<void> {
     const tickMs = this.timing.tickMs;
     let last = this.p.now();
@@ -1483,6 +1497,7 @@ export class Tether {
       this.guard(gen, { t: 'tick' });
       const before = this.state.overall;
       this.deriveState();
+      this.logResumeEta();
       if (this.state.overall !== before) this.set({});
     }
   }
