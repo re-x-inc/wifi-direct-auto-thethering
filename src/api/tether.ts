@@ -137,6 +137,9 @@ export class Tether {
   private peerSuspends = false;
   /** 子機の wifi-result を受けて、子機の方式(suspend / keep)が分かった。分かるまでは suspend とみなす */
   private peerReported = false;
+  /** 親機: 今回の接続で Echo を受けた回数と最初の時刻(wifi-result 未着時の推定用) */
+  private echoCount = 0;
+  private echoFirstAt: number | null = null;
   private rejoining = false;
   /** Direct の再接続中の試行(attempt / max)。null = 再接続中ではない */
   private retry: { attempt: number; max: number; reason: string } | null = null;
@@ -591,6 +594,8 @@ export class Tether {
     this.data = initialDataPath();
     this.peerSuspends = false;
     this.peerReported = false;
+    this.echoCount = 0;
+    this.echoFirstAt = null;
     this.rejoining = false;
     this.retry = null;
     this.resumedBecause = null;
@@ -1322,6 +1327,8 @@ export class Tether {
     this.data = initialDataPath();
     this.peerSuspends = false;
     this.peerReported = false;
+    this.echoCount = 0;
+    this.echoFirstAt = null;
     this.log(`Nearby と Direct: 希望=${this.selfMode}(実効は hello の交換で決まる。確定まで keep) ${JSON.stringify(this.gov.timing)}`);
     // データ経路の観測は keep でも行う(総合状態 overall に使う)。切れたときの動作だけが suspend 方式
     if (role === 'host') {
@@ -1496,7 +1503,10 @@ export class Tether {
 
   private onEchoAccept(gen: number): void {
     if (gen !== this.gen) return;
-    this.data = { ...this.data, echoAt: this.p.now() };
+    const now = this.p.now();
+    this.data = { ...this.data, echoAt: now };
+    this.echoFirstAt ??= now;
+    this.echoCount++;
     this.guard(gen, { t: 'alive' });
     this.hostPeerReady('echo');
     this.set({});
@@ -1505,11 +1515,27 @@ export class Tether {
   /** 親機: 子機が Direct に届いた(到達確認の報告 or エコー受付)。両端末が suspend のときだけ Nearby を止める準備に入る */
   private hostPeerReady(via: string): void {
     if (this.nearbyMode !== 'suspend' || this.state.role !== 'host' || this.state.share !== 'on' || this.shareMsg?.method !== 'WifiDirect') return;
-    if (!this.peerSuspends) return;
+    if (!this.peerSuspends && !this.inferPeerSuspendFromEcho(via)) return;
     if (this.gov.phase === 'nearby') {
       this.gnote(`子機が Direct に届いた(${via})`);
       this.guard(this.gen, { t: 'ready' });
     }
+  }
+
+  /**
+   * 子機の wifi-result(方式の報告)が届かないまま、Echo だけが届いたときの推定。
+   * 実機 b6 12:18: 子機が Direct に入ると Wi-Fi LAN 上の Nearby が切れ、子機の wifi-result が親機に届かなかった。
+   * 到達確認の probe も Echo に 1 回つながるが、ハートビート(suspend 方式の子機だけが送る)は hb 間隔の半分以上あけて繰り返し来る。
+   * 報告が無いうちにそれが来たら、子機は suspend とみなす(あとで wifi-result が届けばそちらを優先)。
+   */
+  private inferPeerSuspendFromEcho(via: string): boolean {
+    if (via !== 'echo' || this.peerReported || this.echoFirstAt === null || this.echoCount < 2) return false;
+    if (this.p.now() - this.echoFirstAt < this.hbMs() / 2) return false;
+    this.peerSuspends = true;
+    // 繰り返し届くハートビートは、子機が Direct に届いている証拠(到達確認の代わり)
+    if (!this.data.reach?.ok) this.data = { ...this.data, reach: { ok: true, at: this.p.now() } };
+    this.gnote(`子機の方式の報告(wifi-result)が未着のまま Echo が ${this.echoCount} 回届いた → 子機は suspend とみなす(Nearby 切断で報告が落ちた可能性)`);
+    return true;
   }
 
   private async suspendNearby(gen: number): Promise<void> {
