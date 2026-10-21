@@ -1,3 +1,5 @@
+import { fakeBusPair } from '../link/fakeBus';
+import type { BusPort } from '../link/busControl';
 import { fakeNearbyPair } from '../link/fakeNearby';
 import { NearbyApi } from '../link/nearbyTransport';
 import { KeyValue } from '../pairing/types';
@@ -14,7 +16,7 @@ export const testRandomHex = (bytes: number) =>
   Array.from({ length: bytes }, () => ((n++ * 37 + 11) % 256).toString(16).padStart(2, '0')).join('');
 
 /** 端末の部品の偽物。呼び出しを calls に記録する。 */
-export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; directDelayMs?: number; joinError?: string; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[]; backgroundLocation?: boolean; nativeHeartbeat?: boolean } = {}) {
+export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; directDelayMs?: number; joinError?: string; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[]; backgroundLocation?: boolean; nativeHeartbeat?: boolean; bus?: BusPort } = {}) {
   const calls: string[] = [];
   const files: Record<string, string> = {};
   const wifiLost = new Set<() => void>();
@@ -112,6 +114,7 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     kv: memKv(),
     hotspot,
     vpn,
+    ...(o.bus ? { bus: o.bus } : {}),
     keepAlive: { start: () => void calls.push('keepAliveStart'), stop: () => void calls.push('keepAliveStop') },
     missingPermissions: async () => [...(o.missingPerms ?? [])],
     backgroundLocationGranted: async () => o.backgroundLocation ?? true,
@@ -127,15 +130,17 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
 }
 
 /** 両端末に同じ共有コードのペアを入れた、親機・子機の偽プラットフォーム(fakeNearbyPair の端末名に合わせる) */
-export async function pairedFakes(guestOpts: { joinError?: string; nativeHeartbeat?: boolean } = {}) {
+export async function pairedFakes(guestOpts: { joinError?: string; nativeHeartbeat?: boolean } = {}, o: { bus?: boolean } = {}) {
   const net = fakeNearbyPair();
-  const host = fakePlatform(net.host, { cellular: true });
-  const guest = fakePlatform(net.guest, { cellular: false, ...guestOpts });
+  /** o.bus: 両端末に Direct 上のバスの偽物を付ける(既定は付けない = 従来どおり Nearby だけ) */
+  const bus = o.bus ? fakeBusPair() : null;
+  const host = fakePlatform(net.host, { cellular: true, bus: bus?.host });
+  const guest = fakePlatform(net.guest, { cellular: false, bus: bus?.guest, ...guestOpts });
   const seed = async (p: TetherPlatform, self: string, peer: string) => {
     await p.kv.set('identity.v1', JSON.stringify({ id: self, name: self }));
     await p.kv.set('pairs.v1', JSON.stringify([{ peerId: peer, peerName: peer, secret: 'shared-secret', createdAt: 1 }]));
   };
   await seed(host.platform, 'DH-HOST', 'DH-GUEST');
   await seed(guest.platform, 'DH-GUEST', 'DH-HOST');
-  return { net, host, guest };
+  return { net, host, guest, bus };
 }

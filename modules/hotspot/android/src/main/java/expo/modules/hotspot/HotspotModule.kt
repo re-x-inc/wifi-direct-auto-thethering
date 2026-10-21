@@ -78,7 +78,7 @@ class HotspotModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("Hotspot")
-    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "onDirectGroup", "onEchoAccept", "onHeartbeat", "log")
+    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "onDirectGroup", "onEchoAccept", "onHeartbeat", "onBusState", "onBusMessage", "log")
     OnCreate { DhLog.sink = { tag, line -> sendEvent("log", mapOf("tag" to tag, "line" to line)) } }
     OnDestroy { heartbeat.stop("module destroy"); DhLog.sink = null }
 
@@ -285,6 +285,34 @@ class HotspotModule : Module() {
     Function("stopEcho") {
       DhLog.i("DH-ECHO", "stop (was listening=${activeEcho?.isClosed == false})")
       echo?.close(); activeEcho?.close(); echo = null; activeEcho = null
+    }
+
+
+    // ---- 制御バス(Direct 上の ZeroMQ。BusEngine) ----
+    /**
+     * バスを始める。host=true: 親機(p2p インターフェースで待ち受け)/ false: 子機(addr の親機へつなぎ、切れても再接続し続ける)。
+     * keyHex は共有コードから JS が導いた鍵。戻り値は bind 先。
+     */
+    Function("busStart") { host: Boolean, selfId: String, peerId: String, keyHex: String, addr: String?, port: Int, pingMs: Int, timeoutMs: Int ->
+      activeBus?.stop(); activeBus = null
+      val e = BusEngine(
+        BusEngine.Config(host, selfId, peerId, keyHex, addr, port, pingMs, timeoutMs),
+        { DhLog.i("DH-BUS", it) },
+        { payload -> sendEvent("onBusMessage", mapOf("payload" to payload)) },
+        { up, reason -> sendEvent("onBusState", mapOf("up" to up, "reason" to reason)) },
+      )
+      val bound = e.start()
+      activeBus = e
+      DhLog.i("DH-BUS", "start host=$host bind=${if (host) bound else "<gateway>:$port"} ping=${pingMs}ms timeout=${timeoutMs}ms")
+      bound
+    }
+    Function("busStop") { DhLog.i("DH-BUS", "stop"); activeBus?.stop(); activeBus = null }
+    /** 認証済みのときだけ送る。false なら送っていない(JS が保留する) */
+    Function("busSend") { payload: String -> activeBus?.send(payload) ?: false }
+    /** JS が止まっていても、ネイティブが更新し続けた生存信号の最終時刻(epoch ms。0 = まだ無い) */
+    Function("busStatus") {
+      val b = activeBus
+      mapOf("running" to (b != null), "up" to (b?.up ?: false), "lastRxAt" to (b?.lastRxAt ?: 0L), "connects" to (b?.connects ?: 0), "lastError" to b?.lastError)
     }
 
     // ---- 子機 ----
@@ -847,6 +875,7 @@ class HotspotModule : Module() {
 
   companion object {
     @Volatile private var activeEcho: ServerSocket? = null
+    @Volatile private var activeBus: BusEngine? = null
     @Volatile private var lastEchoLog = 0L
     /** 子機の参加で setBand(2.4GHz) 付きが通るか。null=未確認 / true=付きで成功 / false=なしで成功(プロセス内で記憶) */
     @Volatile private var joinBandPref: Boolean? = null

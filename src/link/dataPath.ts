@@ -20,9 +20,28 @@ export interface DataPath {
   okAt: number | null;
   /** 到達確認(子機: 自分の probe / 親機: 子機の報告)の最後の結果 */
   reach: { ok: boolean; at: number; rttMs?: number; error?: string } | null;
+  /**
+   * Direct 上のバス(src/link/busControl.ts)の生存信号。認証済みフレーム(ping/pong 含む)を最後に受けた時刻。
+   * ネイティブが JS と無関係に更新し続ける値を、tick で読んで入れる。echoAt / okAt と同じ「最後に生存を確認した時刻」で、
+   * どちらか新しい方を生存とする(lastAliveAt)。バスが無い・旧版の相手のときは null
+   */
+  busAt: number | null;
 }
 
-export const initialDataPath = (): DataPath => ({ group: null, echoAt: null, heartbeat: null, okAt: null, reach: null });
+export const initialDataPath = (): DataPath => ({ group: null, echoAt: null, heartbeat: null, okAt: null, reach: null, busAt: null });
+
+const maxAt = (a: number | null | undefined, b: number | null | undefined): number | null =>
+  a == null ? (b ?? null) : b == null ? a : Math.max(a, b);
+
+/**
+ * 「最後に Direct の生存を確認した時刻」。生存信号の出どころ(Echo = 親機は echoAt・子機は heartbeat の成功時刻、バス = busAt)を
+ * 抽象化した 1 つの値。T_echo / T_direct の判定(deriveOverall)と、governor への alive はこの値で行う。
+ * 出どころが増えても(子機のネイティブ heartbeat など)、ここに足すだけで判定側は変わらない。
+ */
+export function lastAliveAt(d: DataPath, role: 'host' | 'guest'): number | null {
+  const echo = role === 'host' ? d.echoAt : (d.okAt ?? (d.heartbeat?.ok ? d.heartbeat.at : null));
+  return maxAt(echo, d.busAt);
+}
 
 export interface OverallInput {
   role: 'host' | 'guest' | null;
@@ -60,8 +79,9 @@ export function deriveOverall(i: OverallInput): Overall {
     if (!i.shareOn || d.group === false) return 'disconnected';
     if (!d.reach?.ok) return 'degraded';
     if (i.heartbeatMode) {
-      if (d.echoAt === null) return 'degraded';
-      const age = i.now - d.echoAt;
+      const at = lastAliveAt(d, 'host');
+      if (at === null) return 'degraded';
+      const age = i.now - at;
       if (age >= i.directMs) return 'disconnected';
       if (age >= i.echoMs) return 'degraded';
     }
@@ -69,10 +89,12 @@ export function deriveOverall(i: OverallInput): Overall {
   }
   if (!i.wifiJoined || d.group === false) return 'disconnected';
   if (!i.vpnOn || d.reach?.ok === false) return 'degraded';
-  if (i.heartbeatMode && d.heartbeat) {
-    const age = i.now - (d.okAt ?? d.heartbeat.at);
+  if (i.heartbeatMode && (d.heartbeat || d.busAt !== null)) {
+    const age = i.now - (maxAt(d.okAt ?? d.heartbeat?.at ?? null, d.busAt) as number);
     if (age >= i.directMs) return 'disconnected';
-    if (!d.heartbeat.ok || age >= i.echoMs) return 'degraded';
+    // 直近の Echo 失敗でも、それより新しいバスの生存信号があれば異常とはしない
+    const echoBad = !!d.heartbeat && !d.heartbeat.ok && !(d.busAt !== null && d.busAt >= d.heartbeat.at);
+    if (echoBad || age >= i.echoMs) return 'degraded';
   }
   return 'connected';
 }

@@ -7,6 +7,7 @@ import type { KeyValue } from '../pairing/types';
 import type { CapabilityPort } from './capability';
 import type { JoinFailure } from './joinFailure';
 import type { LinkPlan, PlanPolicy } from './planner';
+import type { BusPort } from '../link/busControl';
 
 export type { SendOptions };
 export type { Confirm, Found, PairingResult } from '../pairing/pairing';
@@ -160,6 +161,11 @@ export interface VpnPort {
 }
 
 export interface TetherPlatform {
+  /**
+   * Direct 上の制御バス(省略可。無い/旧版の相手のときは従来どおり Nearby だけ)。
+   * 実体は modules/hotspot の BusEngine(ZeroMQ)。src/link/busControl.ts
+   */
+  bus?: BusPort;
   nearby: NearbyApi;
   /** ネイティブ(DH-P2P / DH-NEARBY)のログを購読する。tether.onLog に流れる。戻り値で解除 */
   onNativeLog?(cb: (tag: string, line: string) => void): () => void;
