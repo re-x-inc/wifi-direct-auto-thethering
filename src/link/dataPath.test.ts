@@ -8,18 +8,18 @@ const base = (o: Partial<OverallInput>): OverallInput => ({
 });
 const d = (p: Partial<ReturnType<typeof initialDataPath>>) => ({ ...initialDataPath(), ...p });
 
-test('親機: グループあり・到達確認 OK・エコー新鮮 = connected', () => {
-  assert.equal(deriveOverall(base({ data: d({ group: true, reach: { ok: true, at: 1 }, echoAt: 95_000 }) })), 'connected');
+test('親機: グループあり・到達確認 OK・バスの生存が新鮮 = connected', () => {
+  assert.equal(deriveOverall(base({ data: d({ group: true, reach: { ok: true, at: 1 }, busAt: 95_000 }) })), 'connected');
 });
 
-test('親機: エコー無通信が T_echo で degraded、T_direct で disconnected', () => {
-  const data = (echoAt: number) => d({ group: true, reach: { ok: true, at: 1 }, echoAt });
+test('親機: 生存信号の無通信が T_echo で degraded、T_direct で disconnected', () => {
+  const data = (busAt: number) => d({ group: true, reach: { ok: true, at: 1 }, busAt });
   assert.equal(deriveOverall(base({ data: data(84_001) })), 'degraded');
   assert.equal(deriveOverall(base({ data: data(70_000) })), 'disconnected');
 });
 
 test('親機: Nearby が繋がっていてもグループが無ければ disconnected(接続表示にならない)', () => {
-  assert.equal(deriveOverall(base({ data: d({ group: false, reach: { ok: true, at: 1 }, echoAt: 99_000 }) })), 'disconnected');
+  assert.equal(deriveOverall(base({ data: d({ group: false, reach: { ok: true, at: 1 }, busAt: 99_000 }) })), 'disconnected');
 });
 
 test('親機: 共有していない・停止中は disconnected、まだ到達確認なしは degraded', () => {
@@ -28,11 +28,11 @@ test('親機: 共有していない・停止中は disconnected、まだ到達�
   assert.equal(deriveOverall(base({ data: d({ group: true }) })), 'degraded');
 });
 
-test('子機: 参加+VPN+ハートビート成功 = connected。失敗/古いと degraded、silence で disconnected', () => {
-  const g = (hb: { ok: boolean; at: number }, okAt: number) => base({ role: 'guest', wifiJoined: true, vpnOn: true, data: d({ group: true, heartbeat: hb, okAt, reach: { ok: true, at: 1 } }) });
-  assert.equal(deriveOverall(g({ ok: true, at: 99_000 }, 99_000)), 'connected');
-  assert.equal(deriveOverall(g({ ok: false, at: 99_000 }, 95_000)), 'degraded');
-  assert.equal(deriveOverall(g({ ok: false, at: 99_000 }, 60_000)), 'disconnected');
+test('子機: 参加+VPN+バスの生存が新鮮 = connected。古いと degraded、silence で disconnected', () => {
+  const g = (busAt: number) => base({ role: 'guest', wifiJoined: true, vpnOn: true, data: d({ group: true, busAt, reach: { ok: true, at: 1 } }) });
+  assert.equal(deriveOverall(g(99_000)), 'connected');
+  assert.equal(deriveOverall(g(95_000)), 'connected');
+  assert.equal(deriveOverall(g(60_000)), 'disconnected');
 });
 
 test('子機: Wi-Fi 未参加は disconnected、VPN 起動中は degraded', () => {
@@ -45,16 +45,16 @@ test('Direct 再接続中は degraded(尽きれば retrying が外れて disconn
   assert.equal(deriveOverall(base({ role: 'guest', retrying: false })), 'disconnected');
 });
 
-test('suspend 未対応の旧部品(heartbeatMode=false)ではエコーの鮮度を見ない', () => {
+test('suspend 未対応の旧部品(heartbeatMode=false)では生存の鮮度を見ない', () => {
   assert.equal(deriveOverall(base({ heartbeatMode: false, data: d({ group: true, reach: { ok: true, at: 1 } }) })), 'connected');
 });
 
 test('外形監視: 生存確認が OK でも internet = ng なら degraded(両端)。netAt は生存の出どころ', () => {
-  const host = d({ group: true, reach: { ok: true, at: 1 }, echoAt: 99_000 });
+  const host = d({ group: true, reach: { ok: true, at: 1 }, busAt: 99_000 });
   assert.equal(deriveOverall(base({ data: host, internetNg: true })), 'degraded');
   assert.equal(deriveOverall(base({ data: host, internetNg: false })), 'connected');
   const guest = base({ role: 'guest', wifiJoined: true, vpnOn: true, data: d({ group: true, netAt: 99_000 }) });
-  assert.equal(deriveOverall(guest), 'connected'); // netAt だけでも生存(Echo/バスが無くても)
+  assert.equal(deriveOverall(guest), 'connected'); // netAt だけでも生存(バスが無くても)
   assert.equal(deriveOverall({ ...guest, internetNg: true }), 'degraded');
   assert.equal(deriveOverall({ ...guest, data: d({ group: true, netAt: 60_000 }), internetNg: false }), 'disconnected'); // T_direct 超
 });

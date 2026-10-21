@@ -38,7 +38,7 @@ export interface LinkSnapshot {
   state: LinkStateInfo;
   overall: Overall;
   /** データ経路の内訳 */
-  path: { nearby: NearbyPhase; group: boolean | null; echoAt: number | null; reach: DataPath['reach']; heartbeat: DataPath['heartbeat'];
+  path: { nearby: NearbyPhase; group: boolean | null; reach: DataPath['reach'];
     /** 最後に Direct の生存を確認した時刻(LinkGovernor が保持。無ければ null) */
     lastAliveAt: number | null;
     /** Direct 上のバス: authenticated / disconnected / off(使っていない) */
@@ -165,7 +165,7 @@ export class LinkGovernor {
   get lastAliveAt(): number | null { return this.aliveMax || null; }
 
   /**
-   * 生存信号の時刻を受け取る**唯一の入口**。送り手(Echo・バス・ZMTP heartbeat)は問わない。
+   * 生存信号の時刻を受け取る**唯一の入口**。送り手(バス・ZMTP heartbeat など)は問わない。
    * 時刻はイベントが起きた時刻(ネイティブが添える)なので、JS が止まっていて遅れて届いても、その時刻で更新する。
    * 未来の時刻は now に丸め、古い時刻(いまの値以下)は無視する。戻り値 = 進んだか
    */
@@ -247,7 +247,7 @@ export class LinkGovernor {
     const d = c?.data;
     return {
       state, overall: c?.overall ?? 'disconnected',
-      path: { nearby: c?.nearby ?? 'down', group: d?.group ?? null, echoAt: d?.echoAt ?? null, reach: d?.reach ?? null, heartbeat: d?.heartbeat ?? null, lastAliveAt: this.aliveMax || null, bus: d?.bus ?? 'off' },
+      path: { nearby: c?.nearby ?? 'down', group: d?.group ?? null, reach: d?.reach ?? null, lastAliveAt: this.aliveMax || null, bus: d?.bus ?? 'off' },
       data: d ? { ...d, aliveAt: this.aliveMax || d.aliveAt } : null,
       internet: c?.internet ?? null, remoteInternet: c?.remoteInternet ?? null,
       history: [...this.hist], timing: c?.timing ?? tm, at: now,
