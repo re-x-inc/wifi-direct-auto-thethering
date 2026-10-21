@@ -53,7 +53,7 @@ export interface OverallInput {
   wifiJoined: boolean;
   /** 子機: vpn が 'on' */
   vpnOn: boolean;
-  /** ハートビート(エコー)が動く方式か(suspend)。keep のときは鮮度を見ない */
+  /** ハートビート(エコー)が動くか(Nearby 部品が suspend 対応)。旧部品の縮退動作のときは鮮度を見ない */
   heartbeatMode: boolean;
   /** Direct の再接続を試している最中(Nearby は止めたまま)。この間は degraded */
   retrying: boolean;

@@ -15,7 +15,6 @@ const until = async (cond: () => boolean, ms = 3000, what = '') => {
 /** 時間を縮めた設定(hb 20ms → T_echo 60 / T_direct 200 / T_nearby 260) */
 const SUSPEND = {
   link: { baseMs: 5, maxMs: 20, pingTimeoutMs: 400 }, connectTimeoutMs: 100, probeIntervalMs: 1,
-  nearbyWhileDirect: 'suspend' as const,
   strictLinkGuard: true,
   timingUnchecked: true,
   timing: { hbIntervalMs: 20, tickMs: 10, echoMs: 60, directMs: 200, nearbyMs: 260, settleMs: 30, retryAttempts: 3, retryBackoffMs: [5], retryJoinTimeoutMs: 50, retryAttemptMs: 50, rejoinMs: 500 },
@@ -61,19 +60,6 @@ test('suspend 中: send は Bus で届く(受諾・地図を開くなど)。Near
   assert.ok(c.bus!.ctl.sent.guest.length >= 1 && c.bus!.ctl.sent.host.some((p) => p.includes('open-map')));
   assert.deepEqual([...c.net.host.leaked, ...c.net.guest.leaked], []); // Nearby の要求は出ていない
   assert.deepEqual([c.net.host.suspendCount, c.net.guest.suspendCount], nearbyBefore);
-  c.cleanup();
-});
-
-test('keep 方式(既定): バスは起動せず、Nearby で届く', async () => {
-  const keep = { link: SUSPEND.link, connectTimeoutMs: 100, probeIntervalMs: 1 };
-  const c = await setup(keep);
-  await c.hostT.start(); await c.guestT.start();
-  await until(() => c.guestT.getState().vpn === 'on');
-  await until(() => c.guestT.getState().link === 'connected', 2000, 'nearby');
-  c.guestT.send({ type: 'accept' });
-  await until(() => c.got.host.length === 1, 1000, 'delivered over nearby');
-  assert.deepEqual(c.bus!.ctl.starts, []);
-  assert.deepEqual(c.bus!.ctl.sent.guest, []);
   c.cleanup();
 });
 
@@ -193,20 +179,6 @@ test('旧版の親機(busPort を送らない)・バス部品なしの端末: �
   assert.equal(c.hostT.getState().nearby, 'suspended');
   assert.equal(c.got.host.length, 0); // suspend 中の Nearby は止まっているので溜まるだけ(従来の挙動)
   assert.ok(c.guestT.getState().pending >= 1);
-  c.cleanup();
-});
-
-test('実効方式が suspend でない(子機が keep)ときは、バスを起動せず Nearby で届く', async () => {
-  const keep = { link: SUSPEND.link, connectTimeoutMs: 100, probeIntervalMs: 1, nearbyWhileDirect: 'keep' as const };
-  const c = await setup(SUSPEND, true, keep);
-  await c.hostT.start(); await c.guestT.start();
-  await until(() => c.guestT.getState().vpn === 'on');
-  await until(() => c.guestT.getState().link === 'connected', 2000, 'nearby');
-  await wait(100);
-  assert.deepEqual(c.bus!.ctl.starts.filter((x) => x === 'guest'), []);
-  c.guestT.send({ type: 'accept' });
-  await until(() => c.got.host.length === 1, 1000, 'delivered over nearby');
-  assert.deepEqual(c.bus!.ctl.sent.guest, []);
   c.cleanup();
 });
 

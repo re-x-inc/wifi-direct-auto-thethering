@@ -16,7 +16,6 @@ const until = async (cond: () => boolean, ms = 3000, what = '') => {
 /** 時間を縮めた設定(hb 20ms → T_echo 60 / T_direct 200 / T_nearby 260) */
 const SUSPEND = {
   link: { baseMs: 5, maxMs: 20, pingTimeoutMs: 400 }, connectTimeoutMs: 100, probeIntervalMs: 1,
-  nearbyWhileDirect: 'suspend' as const,
   strictLinkGuard: true, // 不変条件に違反したら例外(= テスト失敗)
   timingUnchecked: true,
   timing: { hbIntervalMs: 20, tickMs: 10, echoMs: 60, directMs: 200, nearbyMs: 260, settleMs: 30, retryAttempts: 3, retryBackoffMs: [5], retryJoinTimeoutMs: 50, retryAttemptMs: 50, rejoinMs: 500 },
@@ -40,13 +39,27 @@ async function established(c: Awaited<ReturnType<typeof setup>>) {
   await until(() => c.hostT.getState().nearby === 'suspended' && c.guestT.getState().nearby === 'suspended', 3000, 'both suspended');
 }
 
-test('既定は keep: Direct が張れても Nearby を止めない', async () => {
-  const c = await setup({ link: { baseMs: 5, maxMs: 20, pingTimeoutMs: 400 }, connectTimeoutMs: 100, probeIntervalMs: 1 });
+test('設定なしでも常に suspend: 能力の判断・時間設定は従来どおりで、旧版の hello(nwd=keep・tv)を載せても無視して Nearby を止める', async () => {
+  const c = await setup();
+  // 旧版の子機の hello を再現する: hello に廃止した nwd / tv が載っていても、親機の方式は変わらない
   await c.hostT.start(); await c.guestT.start();
-  await until(() => c.guestT.getState().vpn === 'on');
-  await wait(100);
-  assert.equal(c.net.host.suspendCount + c.net.guest.suspendCount, 0);
+  await until(() => c.guestT.getState().vpn === 'on', 3000, 'vpn');
+  (c.guestT as any).ctl?.send({ kind: 'tether.hello', v: 1, rev: 'x', nwd: 'keep', tv: 1 }, { key: 'hello-old', ttlMs: 30_000 });
+  await until(() => c.hostT.getState().nearby === 'suspended' && c.guestT.getState().nearby === 'suspended', 3000, 'both suspended');
+  assert.equal((c.hostT.linkSnapshot() as any).mode, undefined); // 方式の交換は廃止
+  c.cleanup();
+});
+
+test('Nearby 部品が suspend() を持たない(旧部品): エラーにせず警告ログを出し、従来動作(Nearby を止めない)で動く', async () => {
+  const logs: string[] = [];
+  const c = await setup(SUSPEND, (f) => { (f.net.host as any).suspend = undefined; (f.net.guest as any).suspend = undefined; });
+  c.hostT.onLog((l) => logs.push(l));
+  await c.hostT.start(); await c.guestT.start();
+  await until(() => c.guestT.getState().vpn === 'on', 3000, 'vpn');
+  await wait(300);
   assert.equal(c.guestT.getState().nearby, 'up');
+  assert.equal(c.hostT.getState().nearby, 'up');
+  assert.ok(logs.some((l) => l.includes('suspend() 未対応')), '警告ログ');
   c.cleanup();
 });
 
@@ -177,7 +190,7 @@ test('画面用: linkSnapshot / onLink / state.linkState に状態名・ラベ�
 
 test('時間設定: 保存した上書きが次の start で効く。範囲外は既定に丸める(unchecked でないとき)', async () => {
   const f = await pairedFakes();
-  const t = new Tether(f.host.platform, { nearbyWhileDirect: 'suspend', connectTimeoutMs: 100, timing: { hbIntervalMs: 7_000 } });
+  const t = new Tether(f.host.platform, { connectTimeoutMs: 100, timing: { hbIntervalMs: 7_000 } });
   await t.setTimingOverride({ echoMs: 1 as number, settleMs: 9_000 });
   const logs: string[] = [];
   t.onLog((l) => logs.push(l));
@@ -193,7 +206,7 @@ test('時間設定: 保存した上書きが次の start で効く。範囲外�
 
 test('親機が正: 親機の閾値を子機が採用する(子機に別の値があっても)', async () => {
   const f = await pairedFakes();
-  const base = { link: { baseMs: 5, maxMs: 20, pingTimeoutMs: 400 }, connectTimeoutMs: 100, probeIntervalMs: 1, nearbyWhileDirect: 'suspend' as const, timingUnchecked: true };
+  const base = { link: { baseMs: 5, maxMs: 20, pingTimeoutMs: 400 }, connectTimeoutMs: 100, probeIntervalMs: 1, timingUnchecked: true };
   const hostT = new Tether(f.host.platform, { ...base, timing: { hbIntervalMs: 20, echoMs: 60, directMs: 200, nearbyMs: 260, settleMs: 30, tickMs: 10 } });
   const guestT = new Tether(f.guest.platform, { ...base, timing: { hbIntervalMs: 30, echoMs: 90, directMs: 300, nearbyMs: 390, settleMs: 40, tickMs: 10 } });
   await hostT.start(); await guestT.start();
@@ -214,21 +227,8 @@ test('onNearbyError: Nearby のエラーイベントを読み取り専用で購�
   assert.deepEqual(got, [8007]);
 });
 
-test('親機 suspend・子機 keep(方式不一致): 子機は heartbeat を送らないので、親機は Echo が無くても到達確認 OK で connected のまま(Nearby も止めない)', async () => {
-  const f = await pairedFakes();
-  const hostT = new Tether(f.host.platform, SUSPEND);
-  const guestT = new Tether(f.guest.platform, { ...SUSPEND, nearbyWhileDirect: 'keep' as const });
-  await hostT.start(); await guestT.start();
-  await until(() => guestT.getState().vpn === 'on', 3000, 'vpn');
-  await until(() => hostT.getState().overall === 'connected', 3000, 'host connected');
-  await wait(400); // T_echo(60ms)を十分に超える。エコーは一度も来ない
-  assert.equal(hostT.getState().overall, 'connected');
-  assert.equal(f.net.host.suspendCount + f.net.guest.suspendCount, 0);
-  hostT.stop(); guestT.stop();
-});
-
 // 実機 b6 12:18(tether=7815375): 子機が Direct に入ると Wi-Fi LAN 上の Nearby が切れ、子機の wifi-result が親機に届かない。
-// 親機は peerSuspends が分からず、Echo(ハートビート)が届いていても ready に進めなかった。
+// 親機は到達を確認できず、Echo(ハートビート)が届いていても ready に進めなかった。
 test('親機: 子機の wifi-result が届かなくても、ハートビート(Echo)が繰り返し届けば ready → Nearby を止める', async () => {
   let dropped = 0;
   const c = await setup(SUSPEND, (f) => {
@@ -245,7 +245,7 @@ test('親機: 子機の wifi-result が届かなくても、ハートビート(E
   c.cleanup();
 });
 
-test('親機: 子機が keep(wifi-result 未着)で Echo が 1 回だけ(到達確認の probe)なら、ready にしない', async () => {
+test('親機: 子機の wifi-result 未着で Echo が 1 回だけ(到達確認の probe)なら、ready にしない', async () => {
   const c = await setup(SUSPEND, (f) => {
     const send = f.net.guest.send.bind(f.net.guest);
     f.net.guest.send = (id: string, text: string) => { if (text.includes('tether.wifi-result')) return; return send(id, text); };

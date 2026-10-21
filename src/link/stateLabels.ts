@@ -11,7 +11,7 @@ export type LinkStateName =
 
 export const LINK_LABELS: Record<LinkStateName, string> = {
   'stopped': '停止中',
-  'keep-mode': 'Nearby と Direct を併用中',
+  'keep-mode': 'Nearby と Direct を併用中', // suspend 未対応の旧 Nearby 部品の縮退動作のみ
   'nearby-searching': 'Nearby で探しています',
   'nearby-waiting': 'Nearby で待っています',
   'nearby-connected': 'Nearby でつながっています',
@@ -32,7 +32,7 @@ export interface LinkStateInfo {
   name: LinkStateName;
   /** 日本語の短いラベル(LINK_LABELS) */
   label: string;
-  /** 状態機械の phase。suspend 方式でない(keep)ときは null */
+  /** 状態機械の phase。suspend 未対応の旧部品のときは null */
   phase: GuardPhase | null;
   /** この状態に入った時刻(epoch ms)と経過秒 */
   enteredAt: number;

@@ -530,8 +530,8 @@ PR 4 より前は、バスは「つなぐだけ」(制御は Nearby のまま)�
 ### 11.4 生存信号の抽象(Echo → バスへの移行)
 - `DataPath.busAt`(バスの最終受信時刻)を足し、`lastAliveAt(data, role)`(= Echo の最終時刻とバスの最終時刻の新しい方)を T_echo / T_direct の判定(`deriveOverall`)と governor の `alive` の入力にした。出どころが増えても(子機のネイティブ heartbeat など)ここへ足すだけ。
 - バス接続中は **子機の Echo(9000)への接続を省く**。JS の `heartbeatLoop` に加え、**ネイティブ heartbeat(`syncNativeHb` / `heartbeatStart`)も止める**(バスの `busAt` が hb×2.5 以内に新しい間)。バスが落ちて `busAt` が古くなれば、次の tick でネイティブ heartbeat を再開する。旧版の親機のときは従来どおり Echo。
-- Bus を使うのは **実効方式(hello の交換で決まる `nearbyMode`)が suspend のときだけ**。子機が keep・旧版なら、バスは起動せず(起動後に keep へ下がっても運び先は Nearby)従来どおり。
-- 親機の ready: バスが認証済みになれば、Echo の回数による推定(wifi-result 未着時の救済)に頼らず子機を ready とみなす(実効 suspend は hello で合意済み、バスを持つ版であることも分かる)。Echo は引き続き推定の入力として動く。
+- Bus を使うかは運び先の選択で決まる(Direct 稼働中で Nearby を止めている間、かつバスが認証済みになったことがあるとき)。Direct 中は常に Nearby を止めるので方式の条件は無い(keep 方式は廃止)。バス部品が無い・旧版の相手(`busPort` なし)では起動せず従来どおり Nearby。
+- 親機の ready: バスが認証済みになれば、Echo の回数による推定(wifi-result 未着時の救済)に頼らず子機を ready とみなす。Echo は引き続き推定の入力として動く。
 - Echo(9000)は **当面残す**(旧版互換・探針)。バスが実機で Echo 同等に切断を検知できると確認できたら、Echo を探針だけに縮める(第2段以降)。
 - 移行の順: ① 第1段(併存・バス接続中は Echo 省略)→ ② 実機で差を測る(§8.3)→ ③ Echo を探針専用に縮小 → ④ 旧版の互換を切るとき Echo の生存判定を廃止。
 

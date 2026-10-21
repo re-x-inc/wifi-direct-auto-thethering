@@ -1,4 +1,4 @@
-# Nearby と Wi-Fi Direct の使い分け(`nearbyWhileDirect: 'suspend'`)
+# Nearby と Wi-Fi Direct の使い分け(Direct 稼働中は常に Nearby を止める)
 
 ## なぜ
 
@@ -7,31 +7,20 @@ Direct の固定グループが生きている最中に Nearby が(再)接続す
 09:26 は子機 0 台(clients=0)でも起きた。公開 API に帯域アップグレードの抑止・medium 指定の手段が無いため、
 **Direct が生きている間は Nearby の広告・探索・接続要求をすべて止め、Direct が切れたときだけ Nearby で探しに行く**。
 
-設定: `TetherConfig.nearbyWhileDirect: 'keep' | 'suspend'`(既定は `DEFAULT_NEARBY_WHILE_DIRECT` = `'keep'`、定義は `src/link/linkMode.ts` の 1 箇所)。
-これは**自分の希望**で、実効の方式は接続の最初の hello で相手と交換して決まる(次節)。両端末の設定が食い違っても、実効方式は必ず揃う。
+方式はこの一つだけで、設定項目は無い。
 
-## 方式の交換(hello)
+## 廃止した keep 方式(経緯)
 
-2026-10-21 の実機で、親機=suspend・子機=keep の食い違いにより、keep の子機が heartbeat を送らず、親機が 15 秒後に「生存信号なし」で retrying に入った。
-食い違いを設定の運用に頼らず、接続のたびに hello で交換して揃える。
+かつては `TetherConfig.nearbyWhileDirect: 'keep' | 'suspend'`(既定 keep)で、Direct 中も Nearby をつなぎ続ける keep 方式を選べた。
+両端末の食い違い(2026-10-21 の実機: 親機=suspend・子機=keep で、keep の子機が heartbeat を送らず親機が 15 秒後に retrying)を防ぐため、
+hello の `nwd` / `tv` と `tether.timing` の `mode` で実効方式を交換していた。
 
-1. 子機は接続のたびに `tether.hello` に自分の希望 `nwd`(`keep`|`suspend`)と共有 timing の版 `tv` を載せる。
-2. 親機は hello を受けた時点(能力の交換・Direct 作成より前)で実効方式を決め、`tether.timing`(既存の timing 配布と同じ経路)の `mode` に載せて返す。親機は Direct を作る前に hello を最長 `capsWaitMs` 待つ。
-3. 子機は `mode` に従う。両端末の LinkGovernor は同じ実効方式で動く。
+keep 方式は **Direct Group が解除されてしまう**(GMS の帯域アップグレードが固定 P2P グループを消す。上の「なぜ」)ため、Kaz 判断で廃止した。
+モード指定自体が不要になったので、`nearbyWhileDirect` / `DEFAULT_NEARBY_WHILE_DIRECT` / 方式の交換(`nwd`・`tv`・`timing.mode`・`wifi-result.suspend`)・`linkSnapshot().mode` はすべて削除した。
 
-| 親機の希望 | 子機の名乗り | 実効 | 理由 |
-|---|---|---|---|
-| suspend | suspend | **suspend** | 両方 suspend のときだけ |
-| suspend | keep | keep | 子機が keep |
-| keep | suspend | keep | 親機が keep |
-| keep | keep | keep | |
-| suspend | 名乗りなし(旧版) | keep | 方式の交換に未対応 |
-| suspend | 未着(確定前に Direct が張れた) | keep | 安全側。あとから suspend を名乗られても上げない |
-
-- 確定するまでの実効は keep。suspend へ上げられるのは Direct を作る/参加する前だけ(親機は共有開始の待ちを終えたあと、子機は Wi-Fi 参加の前)。Direct 稼働中は Nearby が止まって交換できないため、途中で suspend に変わることはない。keep へ下げるのはいつでも安全なので許す。
-- 旧親機(`mode` なしの timing / timing なし)に当たった新子機も keep。旧版の suspend 子機は自分では suspend のまま動くので、その場合は `wifi-result.suspend`(下)が安全網になる。
-- `tether.wifi-result` の `suspend` は残す。交換が成立すれば冗長だが、①旧版(#20)の親機は交換を知らずにこれで子機の方式を判断する ②子機が Direct 参加後に交換結果を受けた取りこぼしの安全網、のため。全端末が更新されたら削除してよい。
-- ログ: DH-LINK に `方式: 自分=suspend 相手=keep → 実効=keep(理由)` を 1 行。`linkSnapshot().mode`(`{ self, peer, effective, reason }`。peer は `keep|suspend|legacy|null`)に出る。後方互換の追加フィールド。
+- 旧版の端末が hello に載せる `nwd` / `tv`、timing に載せる `mode` は**無視**する。旧版の親機が keep で動いていても、新版の子機は suspend で動く(逆も同じ)。
+- 新旧が混在すると、新版が Nearby を止めたあと keep のままの旧版側は Nearby が切れて困る(子機が旧版 keep なら heartbeat を送らない、等)。**全端末を同時に更新する前提**で、混在の救済は持たない。
+- Nearby 部品が `suspend()` を持たない旧部品のときだけ、エラーにせず警告ログ(`suspend() 未対応`)を出して従来動作(止めない)で縮退する。このとき状態名は `keep-mode`、総合状態は heartbeat の鮮度を見ない。部品を更新すれば解消する。
 
 ## 三つの閾値(T_echo < T_direct < T_nearby)
 
@@ -237,7 +226,7 @@ Direct 稼働中に送れるのは echo 上の heartbeat だけ。それ以外�
 | 内部名 | 日本語ラベル(`LINK_LABELS`。i18n はこの表だけ差し替える) | 状態機械の phase / 条件 | 待っているもの(`waiting.for`) |
 |---|---|---|---|
 | stopped | 停止中 | 未開始 | — |
-| keep-mode | Nearby と Direct を併用中 | keep 方式で Direct が張れている | — |
+| keep-mode | Nearby と Direct を併用中 | suspend 未対応の旧 Nearby 部品の縮退動作のみ(通常は出ない) | — |
 | nearby-searching | Nearby で探しています | 子機・Nearby 未接続 | — |
 | nearby-waiting | Nearby で待っています | 親機・Nearby 未接続(広告中) | — |
 | nearby-connected | Nearby でつながっています | Nearby 接続中・Direct 未確立 | — |
@@ -264,9 +253,9 @@ Direct 稼働中は Nearby を止めるので、`tether.send` などのアプリ
 | Direct 稼働(direct / retrying / rejoining)かつ suspend かつバスが認証済みになったことがある | バス | 切れている間はバスの保留キュー(ttl・key・順序は LinkSupervisor と同じ) |
 | settling / nearby(Nearby が使える) | Nearby | |
 | `tether.wifi`(接続情報) | 常に Nearby | |
-| keep 方式 / 旧版の相手 / バス部品なし | Nearby | 従来どおり |
+| 旧版の相手 / バス部品なし / suspend 未対応の旧 Nearby 部品 | Nearby | 従来どおり |
 
 - **バス断**: Nearby は再開しない(再接続が先)。ネイティブが再接続を続け、認証完了で未確認を seq 順に再送。受け手は (epoch, seq) で重複排除。
 - **Nearby への縮退**: governor が Nearby を再開した(T_direct・再接続の使い切り)、または子機が Wi-Fi 切断でバスを止めたとき、バスの未確認を送信順のまま Nearby の送信へ移す。バスの切断自体は governor に通知しない(生存信号が途絶えることで T_echo → T_direct が進む)。
-- **生存信号**: `lastAliveAt` = Echo(親機=最後の受付、子機=最後の成功)とバス(ネイティブが更新する `lastRxAt`)の新しい方。T_echo / T_direct の判定と governor の `alive` の入力。バス接続中は子機は Echo(JS の heartbeat もネイティブ heartbeat も)を省き、バス断で再開する。Echo は当面残す(旧版互換)。バスを使うのは実効方式が suspend のときだけ。親機はバス認証済みで子機を ready とみなす(Echo 回数の推定は Echo 経路の救済として残る)。
+- **生存信号**: `lastAliveAt` = Echo(親機=最後の受付、子機=最後の成功)とバス(ネイティブが更新する `lastRxAt`)の新しい方。T_echo / T_direct の判定と governor の `alive` の入力。バス接続中は子機は Echo(JS の heartbeat もネイティブ heartbeat も)を省き、バス断で再開する。Echo は当面残す(旧版互換)。親機はバス認証済みで子機を ready とみなす(Echo 回数の推定は Echo 経路の救済として残る)。
 - ログ: `[DH-LINK] 制御メッセージの運び先: …`、`[DH-LINK] バス接続/切断(理由)`、`[DH-BUS]`(TS 側)、ネイティブは logcat/診断の `DH-BUS`。
