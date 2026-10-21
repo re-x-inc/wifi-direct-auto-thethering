@@ -81,3 +81,19 @@ comparisonMarkdown([reportA, reportB], /* onlyDiffs */ true); // 機種比較の
 - `tether.linkSnapshot()`(`onLink`)に **`path.lastAliveAt`**(最後に生存を確認した時刻 epoch ms / 無ければ null)・**`path.bus`**(`authenticated` / `disconnected` / `off`)・`data`(`TetherState.data` と同じ)を追加(追加のみ。mobile は feature-detect で読む)。`TetherState.data.aliveAt` / `.bus` も同じ値。
 - `TetherConfig.timing.busIvlMs`(既定 2000)/ `busTimeoutMs`(既定 6000): バスの ZMTP heartbeat(`ZMQ_HEARTBEAT_IVL` / `TIMEOUT`=`TTL`)。TIMEOUT + IVL < `echoMs`(15s)にする。詳細は GATEWAY_BUS.md §12。
 - **`tether.restartLink(): Promise<{ action: 'rebuild' | 'retry' | 'share' | 'none'; reason?: string }>`**: 再接続専用。LinkGovernor の遷移表に沿って Direct の作り直しと Nearby 復帰の再試行を始める(`shareNow()` の代用をやめる用)。親機は Wi-Fi Direct 共有中なら Direct を作り直す(`rebuild`)、共有していなければ `shareNow()`(`share`)。子機は Direct 稼働中(phase=direct)なら `lost('manual')` で retrying へ(`retry`。尽きれば表どおり Nearby を再開)。すでに再接続中(retrying / rejoining)・停止中は何もしない(`none`)。
+
+## インターネットへの到達(外形監視)
+
+設計は `docs/EXTERNAL_PROBE.md`(§11 に API 表)。tether は probe の実装を抱えず、結果を受ける口を 2 つ持つ。
+
+```ts
+tether.internet.enable(true, { intervalMs: 60_000, failThreshold: 3, recoverThreshold: 2 }); // 既定の供給元(ネイティブ)も動く
+tether.internet.enable(true, { runner: 'none' });   // 供給元を使わず、自前の観測だけを渡す
+tether.internet.update(true);                       // 実通信で成功した(at 省略 = 現在)
+tether.internet.update(false, Date.now(), 'timeout'); // 失敗(reason は任意: link/auth/dns/connect/upstream/timeout/portal/http/tls)
+```
+
+- `state.internet`(子機): `{ state: 'ok'|'ng'|'unknown', since, lastOkAt, lastAttemptAt, consecutiveFailures, reason }`。`overall` とは別の軸。ng の間は `overall` が degraded になる(governor の遷移は動かさない)。
+- `state.remoteInternet`(親機): 子機の報告(`tether.internet`。バス専用)。ok の報告を受けた時刻で親機の生存確認を延命する。
+- `state.data.netAt`: 外形監視による延命の最後の時刻。Echo/バスの最後の生存から T_direct を超えると延命しない。
+- 設定は `TetherConfig.internet` / `setInternetOverride()` / `enable()` の opts。子機は親機の値(間隔・閾値・宛先)に揃う。既定は無効。
