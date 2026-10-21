@@ -1,11 +1,16 @@
 # 子機からインターネットへの外形監視と、LinkGovernor の watchdog 更新 — 設計メモ
 
-状態: 設計のみ(コードは変えない)。2026-10-21 時点の origin/main(2190a35)を読んで書いた。
+状態: 設計メモ。2026-10-21 時点の origin/main(2190a35)を読んで書き、同日 Kaz の指示で **公開 API を 2 つの口(enable / update)に再編**した(§0・§1・§3〜§7 と新設の §11 を更新。実装は PR「外形監視のコア」)。
 **実機で確かめていないことは「未検証」と明記する。推測は事実として書かない。**
 前提として参照するだけの文書: `docs/LINK_STATE.md`(閾値 T_echo/T_direct/T_nearby と状態機械)、`docs/GATEWAY_BUS.md`(Direct 上のバス)、`docs/API.md`。
 別作業で進んでいる「ZMTP heartbeat への移行(lastAliveAt の公開、restartLink)」と「アプリメッセージのバス専用化」は、**入る前提**で書くが、この文書はそれらを変更しない。
 
 ## 0. 要点
+
+- **tether は probe の実装を抱え込まない。公開の口は 2 つ**(詳細は §11):
+  - `tether.internet.enable(on, opts?)` — 有効/無効と設定(`intervalMs` / `failThreshold` / `recoverThreshold` ほか)
+  - `tether.internet.update(success, at?, reason?)` — 実際に通信できたか。結果の出どころは問わない(既定の probe 供給元 = ネイティブ、またはアプリ/ネイティブが子機の VPN 越しの実通信で観測した成功・失敗)
+  - 状態機械(§6)・`noteAliveAt` 連携・親機への報告(§7)・`state` / `linkSnapshot` への公開・設定の配布は **コア(`InternetMonitor`)** が担い、probe 本体(§2・§3 の SOCKS CONNECT + generate_204)は **差し替え可能な供給元(`ExternalProbe.kt` + `src/api/internetProbe.ts`)** として分ける。
 
 - 外形監視は**子機(guest ロール)だけの仕組み**。probe の実行、internet 状態の保持、`noteAliveAt` への反映、watchdog の延命は、すべて子機の Tether とそのネイティブで完結する。
 - **親機は何も probe しない。** 子機が probe の結果(ok / ng / unknown)をバスで報告し、親機は **ok の報告を受けた時刻で自分の watchdog を延命**して表示する。ng / unknown は延命せず表示のみ(§7)。
@@ -34,11 +39,12 @@
 
 ### 差し込み位置(子機)
 
-1. **ネイティブ**: `modules/hotspot` に `ExternalProbe.kt` を新設(`Heartbeat.kt` と同じ作り: 専用スレッド `dh-probe`、`PARTIAL_WAKE_LOCK`、参加した Wi-Fi の `Network.socketFactory`、結果は status と event)。`HotspotModule` に `externalProbeStart / Stop / Status` と `onExternalProbe` を足す。時刻は `System.currentTimeMillis`(heartbeat と同じ)。
-2. **純関数**: `src/link/internetProbe.ts`(新規)。ネイティブの生の結果(最後の成功/失敗時刻、連続失敗数、分類)から `internet` 状態を導く。`now` は注入する(I5)。タイマーは持たない。
-3. **配線**: `tether.ts` の `applyNativeHb` / `syncBus` と同じ場所(tick とイベント)で status を読み、成功時刻を `noteAliveAt` に渡す。開始・停止は子機の heartbeat の開始・停止と同じ条件(参加済み・direct の間だけ)。
-4. **総合状態**: `deriveOverall` に `internet` を入力として足す(§6)。
-5. **governor は変えない**。`internet` は governor の phase を動かさない重ね合わせの軸。
+1. **ネイティブ(供給元。コアとは分離、任意)**: `modules/hotspot` に `ProbeClient.kt`(Android 非依存の 1 周分: SOCKS5 認証 → ドメイン名つき CONNECT → HTTP/1.1 generate_204 → 分類)と `ExternalProbe.kt`(周期の実行)を新設(`Heartbeat.kt` と同じ作り: 専用スレッド `dh-probe`、`PARTIAL_WAKE_LOCK`、参加した Wi-Fi の `Network.socketFactory`、結果は status と event)。`HotspotModule` に `externalProbeStart / Stop / Status` と `onExternalProbe` を足す。時刻は `System.currentTimeMillis`(heartbeat と同じ)。
+2. **コア(`src/link/internetMonitor.ts`)**: `update(success, at, reason)` の 1 件ずつから `internet` 状態を導く(連続失敗/成功を内部で数える)。`now` は注入(I5)、タイマーは持たない。ネイティブの生の status を直接は読まない(読むのは 4. の接続層)。
+3. **配線**: `tether.ts` の `syncInternet`(tick と参加直後)で、有効・参加済み・再接続中でない間だけ監視を活動させ、成功時刻を `noteAliveAt(…, 'net')` に渡す。Kaz の追加要件により、**開始は direct/settling を待たず、参加できた直後**(確認の待ちと並行して最初の 1 周を即時実行)。再接続中(retrying / rejoining)は止めて unknown に戻す。
+4. **接続層(`src/api/internetProbe.ts` の `NativeProbeRunner`)**: 既定の供給元を始め/止め、ネイティブの新しい周を `update()` に渡すだけの薄い層。`enable(on, { runner: 'none' })` で使わず、アプリが自前で `update()` を呼ぶこともできる。
+5. **総合状態**: `deriveOverall` に `internetNg` を入力として足す(§6)。`lastAliveAt` に `netAt` を足した(子機の枝はすでに `lastAliveAt` に揃っている)。
+6. **governor は変えない**。`internet` は governor の phase を動かさない重ね合わせの軸。
 
 ### 不変条件 I1〜I6 との整合
 
@@ -131,11 +137,11 @@
 | B **子機の既定 + 親機の上書き**(推奨) | 子機のコードに既定値。親機が配る `probe` セクションがあれば上書き | 外形監視は子機の仕組みなので、既定は子機が持つ。配布は現場調整用。旧版の親機でも動く |
 | C 子機のみ | 配らない | 調整が端末ごとになる |
 
-配るのは `tether.timing`(`SharedTiming`)とは**別セクション**の `probe`(宛先が文字列の配列で、数値だけの `SharedTiming`/`TIMING_RANGES` の型に合わない)。検証は `timingConfig.ts` と同じ流儀(範囲外・不正は既定に丸めて DH-LINK にログ)。
+配るのは `tether.timing`(`SharedTiming`)とは**別セクション**の `probe`(実装: `tether.timing` の封筒に任意の `probe` フィールドとして同乗。旧版の子機は無視する。`enabled` は親機が true のときだけ子機に反映し、間隔・閾値・宛先・待ち時間は親機が正)(宛先が文字列の配列で、数値だけの `SharedTiming`/`TIMING_RANGES` の型に合わない)。検証は `timingConfig.ts` と同じ流儀(範囲外・不正は既定に丸めて DH-LINK にログ)。設定の層は「既定 < `TetherConfig.internet` < `setInternetOverride`(保存) < `enable()` の opts < 親機から配られた値(子機)」。宛先は現状**平文 http のみ**(https は未実装。§10-3)。
 
 | 設定名 | 既定 | 範囲 | 意味 |
 |---|---|---|---|
-| `enabled` | false(PR 3 まで)→ のち true | — | 外形監視をするか |
+| `enabled` | false(実機で確かめるまで。のち true) | — | 外形監視をするか。`enable(on)` の `on` |
 | `intervalMs` | 60_000 | 15_000〜600_000 | 通常の間隔 |
 | `screenOffIntervalMs` | 120_000 | intervalMs〜600_000 | 画面オフ中(heartbeat と同じ考え方で、短くはしない) |
 | `confirmIntervalMs` | 10_000 | 3_000〜intervalMs | 失敗の直後に確認する間隔 |
@@ -213,7 +219,7 @@ OK 条件は「バスの生存、または外形監視の成功(noteAliveAt)」�
 
 ## 6. 閾値と状態遷移
 
-`internet` の状態遷移(`internetProbe.ts`、子機)。「失敗」は 1 周(全宛先)の結果。reason が `link` の周は失敗に数えない(unknown に戻す)。
+`internet` の状態遷移(`internetMonitor.ts`、コア)。事象は `update(success, at, reason)` 1 件。「失敗」は 1 周(全宛先)の結果、または呼び出し元が実通信で観測した失敗。reason が `link` の周は失敗に数えない(unknown に戻す)。
 
 | 現在 | 事象 | 次 | 動作 |
 |---|---|---|---|
@@ -239,6 +245,8 @@ OK 条件は「バスの生存、または外形監視の成功(noteAliveAt)」�
 | internet = ok / unknown | 従来どおり |
 
 ## 7. 子機から親機への報告と、親機の watchdog(Kaz 方針: 親機も延命する)
+
+実装は `InternetMonitor.maybeReport()`(子機)と `receive()`(親機)。封筒は `channel.ts` の `BUS_ONLY_KINDS`(`tether.app` と `tether.internet`)に載せ、`RoutedControl` が常にバスへ(Nearby に載せない・受けない)、`ttlMs: 0`(溜めない)で送る。`seq` は起動時の時刻から増やす(子機の再起動で親機が古い seq と誤認しない)。
 
 方針: 子機が probe の結果を**バスで親機へ報告**し、親機は **ok の報告を受けた時刻で自分の LinkGovernor の watchdog を延命**して表示する。親機は probe をしない。(前の版の「親機の watchdog には影響させない」案は、この方針で差し替えた。)
 
@@ -390,3 +398,34 @@ OK 条件は「バスの生存、または外形監視の成功(noteAliveAt)」�
 7. 案 A(VPN 全体が通るかの診断)を入れるか。
 8. 親機の応答コードの返し分け(PR 6(任意))を入れるか。
 9. 総合状態の degraded 条件(§6): internet = ng だけで degraded にしてよいか(「連続失敗のときだけ」としたが、閾値 `failThreshold` の既定は実機で見直す)。
+
+## 11. 公開 API(2 つの口)と呼び出し元ごとの責務
+
+### API
+
+| 口 | 引数 | 意味 |
+|---|---|---|
+| `tether.internet.enable(on, opts?)` | `on`: 有効/無効。`opts`: `intervalMs` / `failThreshold` / `recoverThreshold` / `screenOffIntervalMs` / `confirmIntervalMs` / `timeoutMs` / `urls`(すべて任意、§4 の範囲)と `runner: 'native' \| 'none'`(既定 'native' = 既定の供給元を使う) | `enable(false)` の間は `state.internet` が unknown で、`update` は無視される。範囲外は既定に丸めてログ |
+| `tether.internet.update(success, at?, reason?)` | `success`: 実際に通信できたか。`at`: その時刻(省略 = 現在、未来は現在に丸め、古い結果は捨てる)。`reason`: §3 の分類(任意) | 受け付けたら true。`state.internet` の遷移(§6)、成功のたびの `noteAliveAt`(ng の間も)、親機への報告に反映 |
+| `tether.internet.getConfig()` | — | いま有効な設定(親機から配られた値を含む) |
+| `state.internet` / `state.remoteInternet` / `linkSnapshot().internet` | — | 子機の自分の状態 / 親機が受けた子機の報告。`state.data.netAt` は延命に使った最後の成功時刻 |
+
+### 呼び出し元ごとの責務
+
+| 呼び出し元 | やること | tether が肩代わりすること |
+|---|---|---|
+| アプリ(子機) | 起動時に `enable(true, opts)`。自前の実通信(VPN 越しの HTTP など)で成功/失敗を見たら `update()`(`runner: 'none'` にすると既定の供給元と二重にならない) | 状態機械、閾値、延命、親機への報告、設定の配布の受け取り |
+| 既定の供給元(`NativeProbeRunner` + `ExternalProbe.kt`) | 参加直後に即時 1 周、以後は間隔ごと、失敗直後は確認間隔。結果を `update()` へ | 始め/止め(有効・参加済み・再接続中でない間だけ) |
+| アプリ(親機) | `enable(true, opts)`(子機の報告を受ける。この設定が子機へ配られる)。子機の項目は `state.remoteInternet` を見る | 受信、ok の報告で延命、途絶・バス断で確認中に戻す |
+| tether コア | 上記の状態機械・延命(上限つき、§2)・報告・公開 | — |
+
+### 判断した未決(§10 への回答)
+
+1. 延命の上限: **上限つきを実装**。`netAt` は Echo/バスの最後の生存から T_direct を超えたら governor に渡さない(親機も同じ規則)。
+2. 宛先: 公共 2 件(gstatic / cloudflare)。固定 User-Agent は `Mozilla/5.0 (Linux; Android)`(端末・版を含めない)。自社ホストは入れない。
+3. 平文 HTTP を既定。https は**未実装**(設定でも受けない)。
+4. 設定は案 B(子機の既定 + 親機の上書き)。`enabled` の既定は false。
+5. 報告は `tether.internet`(バス専用)。
+6. 親機の延命は ok の報告の受信時刻、途絶判定は `intervalMs`×3。
+9. degraded は `internet = ng`(連続失敗 `failThreshold` 回)のときだけ。
+7・8(案 A の診断、親機の応答コード返し分け)は入れていない。ネイティブは `rep=4 → upstream`、`5 → connect`、`6 → timeout` に対応済みで、親機が返し分ければ自動で効く。
