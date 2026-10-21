@@ -7,10 +7,6 @@ type Events = {
   onWifiLost(e: Record<string, never>): void;
   /** 親機: Direct グループの変化。up=false はグループ消滅(appInitiated=true はアプリ自身が閉じたもの)。clients は参加中の子機の数 */
   onDirectGroup(e: { up: boolean; clients: number; appInitiated: boolean }): void;
-  /** 親機: エコー(9000)に子機が接続してきた(子機のハートビート) */
-  onEchoAccept(e: Record<string, never>): void;
-  /** 子機: ネイティブのハートビートの結果が出た(成功・失敗のたび。JS が起きている間だけ届く) */
-  onHeartbeat(e: HeartbeatStatus): void;
   /** 子機: 外形監視の供給元の 1 周が終わった(成功・失敗のたび。JS が起きている間だけ届く) */
   onExternalProbe(e: ExternalProbeStatus): void;
   /** 制御バス(Direct 上の ZeroMQ)の認証完了/切断 */
@@ -20,18 +16,6 @@ type Events = {
   /** 子機の Wi-Fi 参加。phase 'show' = 端末の許可画面が出る(「接続」を押してもらう)。ok/declined/timeout/cancelled = 終わり */
   onJoinPrompt(e: { ssid: string; phase: 'show' | 'ok' | 'declined' | 'timeout' | 'cancelled'; timeoutMs?: number }): void;
 };
-
-export interface HeartbeatStatus {
-  running: boolean;
-  lastAttemptAt: number;
-  lastOkAt: number;
-  lastFailAt: number;
-  lastError: string | null;
-  lastRttMs: number;
-  consecutiveFailures: number;
-  attempts: number;
-  intervalMs: number;
-}
 
 export interface ExternalProbeStatus {
   running: boolean;
@@ -93,8 +77,6 @@ declare class HotspotModule extends NativeModule<Events> {
   startSocks(port: number, user: string, pass: string): Promise<{ network: 'cellular' | 'default' }>;
   stopSocks(): void;
   socksSelfTest(port: number, user: string, pass: string): Promise<{ ok: boolean; line?: string; error?: string; udp?: boolean }>;
-  startEcho(port: number): void;
-  stopEcho(): void;
   joinWifi(ssid: string, pass: string, timeoutMs?: number | null): Promise<{ gateway: string; reused?: boolean }>;
   leaveWifi(): void;
   /** セルラー回線(INTERNET 能力つき)があるか */
@@ -104,10 +86,6 @@ declare class HotspotModule extends NativeModule<Events> {
   suggestWifi(ssid: string, pass: string): Promise<{ gateway: string; reused?: boolean }>;
   bindToJoined(): boolean;
   unbindProcess(): void;
-  /** 子機: ハートビートをネイティブのスレッドで続ける(JS が止まっても動く)。参加した Wi-Fi に bind して接続する */
-  heartbeatStart(host: string, port: number, intervalMs: number, timeoutMs: number, screenOffIntervalMs: number, wakeLock: boolean): void;
-  heartbeatStop(): void;
-  heartbeatStatus(): HeartbeatStatus;
   /** 子機: 外形監視の供給元。親機の中継へ参加した Wi-Fi で直接つなぎ、generate_204 を確かめる。始めたらすぐ 1 周実行する */
   externalProbeStart(o: ExternalProbeOptions): void;
   externalProbeStop(): void;
@@ -118,7 +96,6 @@ declare class HotspotModule extends NativeModule<Events> {
   busSend(payload: string): boolean;
   /** JS が止まっていてもネイティブが更新し続ける生存信号 */
   busStatus(): { running: boolean; up: boolean; lastRxAt: number; aliveAt?: number; disconnectedAt?: number; connections?: number; disconnects?: number; connects: number; lastError: string | null };
-  probe(host: string, port: number): Promise<{ ok: boolean; rttMs?: number; error?: string }>;
 }
 
 export default requireNativeModule<HotspotModule>('Hotspot');

@@ -26,7 +26,6 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -52,8 +51,6 @@ class HotspotModule : Module() {
   private var joined: Network? = null
   private var joinedSsid: String? = null
   private var joinedGw: String? = null
-  private var echo: ServerSocket? = null
-  private val heartbeat = Heartbeat({ joined }) { st -> sendEvent("onHeartbeat", st) }
   private val externalProbe = ExternalProbe({ joined }) { st -> sendEvent("onExternalProbe", st) }
   private var socks: SocksServer? = null
   private var socksRef: SocksServer? = null
@@ -79,9 +76,9 @@ class HotspotModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("Hotspot")
-    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "onDirectGroup", "onEchoAccept", "onHeartbeat", "onExternalProbe", "onBusState", "onBusMessage", "log")
+    Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "onDirectGroup", "onExternalProbe", "onBusState", "onBusMessage", "log")
     OnCreate { DhLog.sink = { tag, line -> sendEvent("log", mapOf("tag" to tag, "line" to line)) } }
-    OnDestroy { heartbeat.stop("module destroy"); externalProbe.stop("module destroy"); DhLog.sink = null }
+    OnDestroy { externalProbe.stop("module destroy"); DhLog.sink = null }
 
     // ---- 親機 ----
     AsyncFunction("startHotspot") { promise: Promise ->
@@ -250,45 +247,6 @@ class HotspotModule : Module() {
       }.start()
     }
 
-    /** 到達確認用の TCP エコーサーバー(受け取った文字列をそのまま返す) */
-    Function("startEcho") { port: Int ->
-      // JS のリロードでモジュールが作り直されても前回のソケットを閉じられるよう、静的に保持する
-      val hadOld = activeEcho != null || echo != null
-      activeEcho?.close(); echo?.close()
-      val s = try {
-        ServerSocket().apply { reuseAddress = true; bind(InetSocketAddress(port)) }
-      } catch (e: Exception) {
-        DhLog.w("DH-ECHO", "start FAILED port=$port ${e.javaClass.simpleName}: ${e.message}")
-        throw e
-      }
-      echo = s; activeEcho = s
-      DhLog.i("DH-ECHO", "start ok port=$port bind=${s.localSocketAddress} replacedOld=$hadOld")
-      Thread {
-        while (!s.isClosed) {
-          try {
-            val c = s.accept()
-            // 子機のハートビートが数秒おきに来るので、ログは 30 秒に 1 回だけ(最初の 1 回は必ず)。JS へは毎回知らせる
-            val nowMs = android.os.SystemClock.elapsedRealtime()
-            if (nowMs - lastEchoLog > 30_000L) { DhLog.i("DH-ECHO", "accept from ${c.inetAddress?.hostAddress} (以降のハートビートは 30 秒に 1 回だけ記録)"); lastEchoLog = nowMs }
-            sendEvent("onEchoAccept", emptyMap<String, Any>())
-            Thread {
-              c.use { sock ->
-                val buf = ByteArray(256)
-                val n = sock.getInputStream().read(buf)
-                if (n > 0) sock.getOutputStream().write(buf, 0, n)
-              }
-            }.start()
-          } catch (e: Exception) { if (!s.isClosed) DhLog.w("DH-ECHO", "accept loop ended: ${e.javaClass.simpleName}: ${e.message}"); break }
-        }
-        DhLog.i("DH-ECHO", "accept loop exit closed=${s.isClosed}")
-      }.start()
-    }
-    Function("stopEcho") {
-      DhLog.i("DH-ECHO", "stop (was listening=${activeEcho?.isClosed == false})")
-      echo?.close(); activeEcho?.close(); echo = null; activeEcho = null
-    }
-
-
     // ---- 制御バス(Direct 上の ZeroMQ。BusEngine) ----
     /**
      * バスを始める。host=true: 親機(p2p インターフェースで待ち受け)/ false: 子機(addr の親機へつなぎ、切れても再接続し続ける)。
@@ -428,16 +386,6 @@ class HotspotModule : Module() {
     Function("unbindProcess") { cm.bindProcessToNetwork(null) }
 
     /**
-     * 子機のハートビートをネイティブで続ける(JS が止まっても動く)。接続先は親機の GO の IP とエコーのポート。
-     * 参加した Wi-Fi(joined)の socketFactory で接続する(probe と同じ経路)。結果は heartbeatStatus で読み、onHeartbeat でも届く。
-     */
-    Function("heartbeatStart") { host: String, port: Int, intervalMs: Double, timeoutMs: Double, screenOffIntervalMs: Double, wakeLock: Boolean ->
-      heartbeat.start(ctx, host, port, intervalMs.toLong(), timeoutMs.toLong(), screenOffIntervalMs.toLong(), wakeLock)
-    }
-    Function("heartbeatStop") { heartbeat.stop("JS") }
-    Function("heartbeatStatus") { heartbeat.status() }
-
-    /**
      * 子機: 外形監視の供給元(ExternalProbe)。親機の中継(SOCKS5)へ、参加した Wi-Fi の Network で直接つなぎ、generate_204 を確かめる。
      * 始めたらすぐ 1 周実行する。結果は externalProbeStatus で読み、onExternalProbe でも届く。tether のコアは src/api/internetProbe.ts 経由で使う。
      */
@@ -453,27 +401,6 @@ class HotspotModule : Module() {
     Function("externalProbeStop") { externalProbe.stop("JS") }
     Function("externalProbeStatus") { externalProbe.status() }
 
-    /** 参加した Wi-Fi 経由で host:port へ TCP 接続し、"ping" を送って往復時間(ms)を返す。 */
-    AsyncFunction("probe") { host: String, port: Int, promise: Promise ->
-      val n = joined
-      Thread {
-        try {
-          val t0 = System.nanoTime()
-          val s = (n?.socketFactory?.createSocket() ?: Socket())
-          s.use {
-            it.connect(InetSocketAddress(host, port), 5000)
-            it.soTimeout = 5000
-            it.getOutputStream().write("ping".toByteArray())
-            val buf = ByteArray(16)
-            val len = it.getInputStream().read(buf)
-            val ok = len > 0 && String(buf, 0, len) == "ping"
-            promise.resolve(mapOf("ok" to ok, "rttMs" to (System.nanoTime() - t0) / 1_000_000))
-          }
-        } catch (e: Exception) {
-          promise.resolve(mapOf("ok" to false, "error" to (e.message ?: e.toString())))
-        }
-      }.start()
-    }
   }
 
   /** 合言葉の突き合わせ用に、先頭 4 桁だけの SHA-256(合言葉そのものは出さない)。親機・子機で同じ値になるはず */
@@ -891,9 +818,7 @@ class HotspotModule : Module() {
   }
 
   companion object {
-    @Volatile private var activeEcho: ServerSocket? = null
     @Volatile private var activeBus: BusEngine? = null
-    @Volatile private var lastEchoLog = 0L
     /** 子機の参加で setBand(2.4GHz) 付きが通るか。null=未確認 / true=付きで成功 / false=なしで成功(プロセス内で記憶) */
     @Volatile private var joinBandPref: Boolean? = null
   }

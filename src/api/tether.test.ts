@@ -17,7 +17,8 @@ const until = async (cond: () => boolean, ms = 2000) => {
 const CFG = { link: { baseMs: 5, maxMs: 20, pingTimeoutMs: 200 }, connectTimeoutMs: 100, probeIntervalMs: 1 };
 
 async function setup() {
-  const f = await pairedFakes();
+  // 到達確認はバス(ZMQ)の認証で行うので、バスの偽物を付ける
+  const f = await pairedFakes({}, { bus: true });
   const host = new Tether(f.host.platform, CFG);
   const guest = new Tether(f.guest.platform, CFG);
   return { ...f, hostT: host, guestT: guest };
@@ -45,7 +46,7 @@ test('start だけで 接続 → 共有 → 子機が参加して VPN まで張�
   assert.equal(hostT.getState().share, 'on');
   assert.equal(hostT.getState().shareMethod, 'WifiDirect');
   assert.ok(guest.calls.includes('vpnStart'));
-  assert.ok(host.calls.includes('startSocks') && host.calls.includes('startEcho'));
+  assert.ok(host.calls.includes('startSocks'));
   await until(() => hostT.getState().peerReach?.ok === true);
   hostT.stop(); guestT.stop();
 });
@@ -63,7 +64,10 @@ test('Direct が張れている間だけ Nearby に directActive=true を知ら�
 });
 
 test('バス部品が無い端末: アプリのメッセージは Nearby に載らず、溜まるだけ(ttl で捨てる)', async () => {
-  const { hostT, guestT, net } = await setup();
+  const f = await pairedFakes(); // バス部品なし
+  const hostT = new Tether(f.host.platform, CFG);
+  const guestT = new Tether(f.guest.platform, CFG);
+  const { net } = f;
   const got: unknown[] = [];
   guestT.onMessage((b) => got.push(b));
   const logs: string[] = [];

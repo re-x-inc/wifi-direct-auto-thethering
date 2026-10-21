@@ -29,7 +29,6 @@ import {
   HandshakeEvent,
   HotspotPort,
   MessageMeta,
-  NativeHeartbeatStatus,
   SendOptions,
   StartOptions,
   TetherConfig,
@@ -152,20 +151,14 @@ export class Tether {
   private data: DataPath = initialDataPath();
   /** 子機から到達確認(wifi-result)を受けた、または Direct 作り直しで子機が Direct に居ると分かった */
   private peerReachKnown = false;
+  /** バスで最後に生存を確かめた時刻(新しい Direct のセッションで null に戻す)。外形監視の延命の上限の基準 */
+  private lastBusAt: number | null = null;
   /** 親機: 今回の接続で Echo を受けた回数と最初の時刻(wifi-result 未着時の推定用) */
-  private echoCount = 0;
-  private echoFirstAt: number | null = null;
   private rejoining = false;
   /** Direct の再接続中の試行(attempt / max)。null = 再接続中ではない */
   private retry: { attempt: number; max: number; reason: string } | null = null;
   private gateway: string | null = null;
-  private lastPort = ECHO_PORT;
   private offGroup: (() => void) | null = null;
-  private offEcho: (() => void) | null = null;
-  /** 子機: ネイティブのハートビートが動いている(接続先)。null = 動いていない(JS の heartbeatLoop が代わりに動く) */
-  private hbNative: { host: string; port: number } | null = null;
-  private offHb: (() => void) | null = null;
-  private hbFailNoted = 0;
   private overallSubs = new Set<(o: Overall, prev: Overall) => void>();
   /** インターネット外形監視のコア(状態機械・報告・親機の受信)。probe の実装は持たない */
   private monitor: InternetMonitor;
@@ -634,14 +627,11 @@ export class Tether {
     if (wasHost || this.state.share !== 'off') {
       this.log(`共有を停止(エコー・SOCKS・Direct を閉じる share=${this.state.share})`);
       try { h.stopSocks(); } catch {}
-      try { h.stopEcho(); } catch {}
       try { h.stopHotspot(); } catch {}
       void h.stopDirect().catch(() => {});
     }
     this.nearbyDirectActive(false);
     this.offGroup?.(); this.offGroup = null;
-    this.offEcho?.(); this.offEcho = null;
-    this.stopNativeHb('stop');
     this.probeRunner.stop('stop');
     this.quiet = true;
     try { this.monitor.setActive(false); this.monitor.reset('stop'); } finally { this.quiet = false; }
@@ -650,8 +640,6 @@ export class Tether {
     this.gov.reset();
     this.data = initialDataPath();
     this.peerReachKnown = false;
-    this.echoCount = 0;
-    this.echoFirstAt = null;
     this.rejoining = false;
     this.retry = null;
     this.resumedBecause = null;
@@ -918,12 +906,11 @@ export class Tether {
     h.stopSocks();
     try { h.stopHotspot(); } catch {}
     this.nearbyDirectActive(false);
-    this.gov.forgetAlive(); this.data = { ...this.data, group: null, echoAt: null, busAt: null, netAt: null, aliveAt: null, reach: null };
+    this.gov.forgetAlive(); this.lastBusAt = null; this.data = { ...this.data, group: null, echoAt: null, busAt: null, netAt: null, aliveAt: null, reach: null };
     await h.stopDirect().catch(() => {});
     await this.p.sleep(1500);
     if (gen !== this.gen) return null;
-    // 子機は承認済みの SSID が見えた瞬間に自動参加して到達確認をする。待たせて拒否されないよう、ポートを先に開けておく
-    try { h.startEcho(ECHO_PORT); this.log(`エコー起動 (port ${ECHO_PORT})`); } catch (e: any) { this.log('エコー起動失敗: ' + (e?.message ?? e)); }
+    // Echo(TCP の ping)は廃止。生存確認はバス(ZMQ の P/O)の aliveAt で行う
     const socks: Socks = { port: SOCKS_PORT, user: 'u' + this.p.randomHex(4), pass: this.p.randomHex(12) };
     try {
       const { network } = await h.startSocks(socks.port, socks.user, socks.pass);
@@ -972,7 +959,6 @@ export class Tether {
     this.log(`${what} を作る間に停止された: 残ったグループを閉じる`);
     const h = this.hotspot;
     try { h.stopSocks(); } catch {}
-    try { h.stopEcho(); } catch {}
     this.stopBus('orphan');
     try { h.stopHotspot(); } catch {}
     await h.stopDirect().catch(() => {});
@@ -1022,7 +1008,9 @@ export class Tether {
         this.log(`LocalOnlyHotspot 成功(${i}回目)`);
         if (this.abandoned(gen)) { await this.dropOrphan('LocalOnlyHotspot'); return null; }
         void this.record('LocalOnlyHotspot', 'create', true);
-        return { kind: 'tether.wifi', method: 'LocalOnlyHotspot', ssid: cred.ssid, pass: cred.passphrase, port: ECHO_PORT, socks };
+        // 到達確認はバス(ZMQ)の認証で行うので、LocalOnlyHotspot でもバスを待ち受けて番号を渡す
+        const busPort = this.startBusHost();
+        return { kind: 'tether.wifi', method: 'LocalOnlyHotspot', ssid: cred.ssid, pass: cred.passphrase, port: ECHO_PORT, socks, ...(busPort ? { busPort } : {}) };
       } catch (e: any) {
         this.log(`LocalOnlyHotspot 失敗 ${i}/3: ${e?.message ?? e}`);
         if (i < 3) await this.p.sleep(2000);
@@ -1140,7 +1128,7 @@ export class Tether {
     if (gen !== this.gen) return;
     this.nearbyDirectActive(false);
     this.safeStopVpn();
-    this.gov.forgetAlive(); this.data = { ...this.data, group: false, heartbeat: null, okAt: null, busAt: null, netAt: null, aliveAt: null };
+    this.gov.forgetAlive(); this.lastBusAt = null; this.data = { ...this.data, group: false, heartbeat: null, okAt: null, busAt: null, netAt: null, aliveAt: null };
     this.monitor.setActive(false);
     this.stopBus('wifi-lost');
     this.gateway = null;
@@ -1178,22 +1166,16 @@ export class Tether {
       // join ok は OS が local-only ネットワークを渡しただけ。実際に親機まで届くかは、このあとの到達確認・VPN のログで見る
       this.log(`参加 ok gw=${gateway} → 到達確認(link=${this.state.link})`);
       this.gateway = gateway;
-      this.lastPort = m.port;
       this.data = { ...this.data, group: true };
       this.set({ wifi: 'joined' });
       this.nearbyDirectActive(true);
       this.syncInternet(gen); // 参加できた直後に最初の外形監視をすぐ始める(到達確認・VPN 起動と並行)
-      // 親機のポートが開くのが少し遅れることがあるので、一定間隔で再試行する
-      const retries = this.cfg.probeRetries ?? 10;
-      let res = await h.probe(gateway, m.port);
-      for (let i = 1; i < retries && !res.ok; i++) {
-        this.log(`到達確認 NG(${i}/${retries}): ${res.error}`);
-        await this.p.sleep(this.cfg.probeIntervalMs ?? 2000);
-        if (gen !== this.gen) return;
-        res = await h.probe(gateway, m.port);
-      }
-      this.log(`到達確認 ${res.ok ? `OK ${res.rttMs}ms` : `NG ${res.error}`}`);
-      this.data = { ...this.data, reach: { ok: res.ok, at: this.p.now(), rttMs: res.rttMs, error: res.error }, ...(res.ok ? { heartbeat: { ok: true, at: this.p.now() }, okAt: this.p.now() } : {}) };
+      // 到達確認 = 親機の制御バス(ZMQ)の認証。Wi-Fi に固定してからバスをつなぎ、認証が通ったかで判定する(Echo は使わない)
+      if (!h.bindToJoined()) this.log('Wi-Fi への固定に失敗');
+      const res = await this.reachViaBus(gen, gateway, m.busPort);
+      if (gen !== this.gen) return;
+      this.log(`到達確認(バス) ${res.ok ? `OK ${res.rttMs}ms` : `NG ${res.error}`}`);
+      this.data = { ...this.data, reach: { ok: res.ok, at: this.p.now(), rttMs: res.rttMs, error: res.error } };
       this.ctl?.send({ kind: 'tether.wifi-result', gateway, ...res } satisfies Wire, { key: 'wifi-result', ttlMs: WIFI_TTL_MS });
       if (res.ok) await this.startVpn(gen, gateway, m.socks);
       else this.set({ error: '親機に届きません。親機が近くにあり、共有が始まっているか確認してください' });
@@ -1233,9 +1215,6 @@ export class Tether {
         return;
       }
       this.set({ vpn: 'starting' });
-      if (!this.hotspot.bindToJoined()) this.log('Wi-Fi への固定に失敗');
-      // バスの接続は、プロセスを Direct の Wi-Fi に固定したあとに始める(ZeroMQ のソケットは Network を指定できず、プロセスの固定に従う)
-      this.startBusGuest(gateway, this.lastJoined?.busPort);
       v.start(gateway, socks.port, socks.user, socks.pass);
       await this.p.sleep(1500);
       if (gen !== this.gen || this.vpnHold) return;
@@ -1315,7 +1294,7 @@ export class Tether {
     if (!guest) return;
     if (want && this.probeRunnerMode === 'native') {
       const j = this.lastJoined as WifiMsg;
-      this.probeRunner.sync({ socksHost: this.gateway as string, socksPort: j.socks.port, user: j.socks.user, pass: j.socks.pass, cfg: this.monitor.config, wakeLock: this.cfg.hbWakeLock ?? true });
+      this.probeRunner.sync({ socksHost: this.gateway as string, socksPort: j.socks.port, user: j.socks.user, pass: j.socks.pass, cfg: this.monitor.config, wakeLock: true });
       this.probeRunner.poll();
     } else this.probeRunner.stop(want ? '供給元を使わない設定' : '不要になった(無効・未参加・再接続中)');
   }
@@ -1409,10 +1388,6 @@ export class Tether {
   //
   // 判断の理由と状態遷移は src/link/directGuard.ts(純関数)。ここは信号を集めて、返ってきた動作(suspend / resume)を実行する。
 
-  private hbMs(): number {
-    return this.timing.hbIntervalMs;
-  }
-
   /** 判定の理由を診断ログ(DH-TETHER)と logcat(DH-NEARBY)の両方に残す。ssid・pass・secret は含めない */
   private gnote(msg: string): void {
     this.log('[DH-LINK] ' + msg);
@@ -1428,17 +1403,13 @@ export class Tether {
     this.gov.reset();
     this.data = initialDataPath();
     this.peerReachKnown = false;
-    this.echoCount = 0;
-    this.echoFirstAt = null;
     this.log(`Nearby と Direct: Direct 稼働中は Nearby を止める ${JSON.stringify(this.gov.timing)}`);
     // データ経路の観測は suspend できない旧部品でも行う(総合状態 overall に使う)
     if (role === 'host') {
       this.offGroup = this.hotspot.onDirectGroup?.((e) => this.onDirectGroup(gen, e)) ?? null;
-      this.offEcho = this.hotspot.onEchoAccept?.(() => this.onEchoAccept(gen)) ?? null;
     }
     if (!this.suspendOk) return;
     void this.guardLoop(gen);
-    if (role === 'guest') void this.heartbeatLoop(gen);
   }
 
   /** 事象を governor(遷移表)に入れる。動作は onAction → runAction で実行される */
@@ -1466,15 +1437,9 @@ export class Tether {
       if (gen !== this.gen) return;
       const t = this.p.now();
       // JS が止まっていた(画面オフ・Doze)あとの最初の tick は、無通信を数え直す(止まっていた間は相手の通信も遅れたとみなす)
-      // ネイティブのハートビートが動いていれば、まずその最新の結果を読む。止まっていた時間は「失敗」ではなく、
-      // ネイティブが記録した最後の成功時刻で判定する(ネイティブ自身も止まっていた場合だけ、従来どおり数え直す)
-      const nativeFresh = this.syncNativeHb(gen);
       if (t - last > Math.max(tickMs * 5, 3_000)) {
-        if (nativeFresh) this.gnote(`判定が ${t - last}ms 止まっていた(Doze など): ネイティブのハートビート結果で判定(数え直さない)`);
-        else {
-          this.gnote(`判定が ${t - last}ms 止まっていた(Doze など): 無通信の数え直し`);
-          this.gov.grace();
-        }
+        this.gnote(`判定が ${t - last}ms 止まっていた(Doze など): 無通信の数え直し`);
+        this.gov.grace();
       }
       last = t;
       this.syncBus(gen);
@@ -1488,77 +1453,27 @@ export class Tether {
   }
 
   /**
-   * 子機: ネイティブのハートビートを、あるべき状態(Wi-Fi 参加中・親機の IP が分かっている)に合わせて開始/停止/結果の取り込みをする。
-   * 戻り値 = ネイティブの結果が新鮮(ネイティブ自身が止まっていない)なら true。使えない部品・起動失敗は false(JS の heartbeatLoop が動く)。
-   */
-  private syncNativeHb(gen: number): boolean {
-    const h = this.hotspot;
-    if (typeof h.heartbeatStart !== 'function' || typeof h.heartbeatStatus !== 'function') return false;
-    const want = this.state.role === 'guest' && this.suspendOk && this.state.wifi === 'joined' && !!this.gateway;
-    if (!want) { this.stopNativeHb('不要になった(Wi-Fi 未参加・停止)'); return false; }
-    // バスが認証済み(または起動/切断の直後で結果待ち)の間は Echo を始めない・止める。バス断が grace 続いたら再開する(ヒステリシス)
-    if (this.busHoldsEcho()) {
-      this.stopNativeHb('バス接続中は Echo を省く');
-      return true; // 生存信号はバスの aliveAt イベント(ネイティブが更新)。JS が止まっていた間も数え直さない
-    }
-    const host = this.gateway as string;
-    const port = this.lastPort;
-    if (!this.hbNative || this.hbNative.host !== host || this.hbNative.port !== port) {
-      this.stopNativeHb('接続先が変わった');
-      const hb = this.hbMs();
-      let off = this.cfg.hbScreenOffIntervalMs;
-      if (off !== undefined) off = Math.max(hb, Math.min(off, Math.floor(this.gov.timing.echoMs / 2)));
-      try {
-        h.heartbeatStart({ host, port, intervalMs: hb, timeoutMs: Math.min(3_000, hb), screenOffIntervalMs: off, wakeLock: this.cfg.hbWakeLock ?? true });
-      } catch (e: any) {
-        this.gnote(`ネイティブのハートビート起動失敗(JS で代替): ${e?.message ?? e}`);
-        return false;
-      }
-      this.hbNative = { host, port };
-      this.hbFailNoted = 0;
-      this.offHb = h.onHeartbeat?.((st) => { if (gen === this.gen) this.applyNativeHb(gen, st); }) ?? null;
-      this.gnote(`ネイティブのハートビート開始 ${hb}ms${off ? ` (画面オフ中 ${off}ms)` : ''}: JS が止まっても親機のエコーへ送り続ける`);
-    }
-    let st: NativeHeartbeatStatus;
-    try { st = h.heartbeatStatus(); } catch { return false; }
-    if (!st.running) { this.stopNativeHb('ネイティブが停止していた'); return false; }
-    this.applyNativeHb(gen, st);
-    // ネイティブ自身が長く試行していない(CPU が眠っていた等)ときは、結果を新鮮とみなさない
-    const ref = st.lastAttemptAt || 0;
-    return ref > 0 && this.p.now() - ref <= this.hbMs() * 2.5 + 3_000;
-  }
-
-  private stopNativeHb(why: string): void {
-    this.offHb?.(); this.offHb = null;
-    if (!this.hbNative) return;
-    this.hbNative = null;
-    try { this.hotspot.heartbeatStop?.(); } catch {}
-    this.gnote(`ネイティブのハートビート停止(${why})`);
-  }
-
-  /**
    * 生存信号の最終成功時刻(lastAliveAt)を governor に入れる唯一の入口。送信元は問わない
    * (いまはネイティブの Echo ハートビート。Direct 上のバスの ping に置き換わっても、ここへ at を渡すだけでよい)。
    * 新しい時刻なら true。
    */
-  private noteAliveAt(gen: number, at: number, src: 'echo' | 'bus' | 'net' = 'echo'): boolean {
+  private noteAliveAt(gen: number, at: number, src: 'bus' | 'net' = 'bus'): boolean {
     if (gen !== this.gen) return false;
-    if (src === 'echo') {
-      if (at <= (this.data.okAt ?? 0)) return false;
-      this.data = { ...this.data, heartbeat: { ok: true, at }, okAt: at };
-    } else if (src === 'net') {
+    if (src === 'net') {
       // 外形監視による延命(子機: 自分の観測 / 親機: 子機の ok の報告)。heartbeat 表示や ready の副作用は持たない。
-      // 上限: Echo・バスの最後の生存から T_direct を超えたら延命しない(制御の死を隠さない。docs/EXTERNAL_PROBE.md §2)
+      // 上限: バスの最後の生存から T_direct を超えたら延命しない(制御の死を隠さない。docs/EXTERNAL_PROBE.md §2)
       if (at <= (this.data.netAt ?? 0)) return false;
-      const base = Math.max(this.data.okAt ?? 0, this.data.busAt ?? 0, this.data.echoAt ?? 0);
+      // 基準はバスで最後に生存を確かめた時刻(延命の時刻は含めない。含めると延命のたびに基準が動いて上限が効かない)
+      const base = this.lastBusAt ?? 0;
       if (base > 0 && at - base >= this.gov.timing.directMs) {
-        if (at - this.netCapNoted >= 60_000) { this.netCapNoted = at; this.gnote(`外形監視の成功では延命しない: Echo/バスの最後の生存から ${at - base}ms(上限 T_direct=${this.gov.timing.directMs}ms)`); }
+        if (at - this.netCapNoted >= 60_000) { this.netCapNoted = at; this.gnote(`外形監視の成功では延命しない: バスの最後の生存から ${at - base}ms(上限 T_direct=${this.gov.timing.directMs}ms)`); }
         return false;
       }
       this.data = { ...this.data, netAt: at };
     } else {
       if (at <= (this.data.busAt ?? 0)) return false;
       this.data = { ...this.data, busAt: at };
+      this.lastBusAt = Math.max(this.lastBusAt ?? 0, at);
     }
     // 最終時刻の保持は LinkGovernor(max。古い時刻へは戻さない)。画面・判定はそこから反映した aliveAt だけを読む
     this.gov.noteAliveAt(at);
@@ -1568,57 +1483,6 @@ export class Tether {
     if (kept !== null) this.gov.setAliveAt(kept);
     if (src !== 'net' && this.gov.phase === 'nearby' && this.state.vpn === 'on' && !this.joining) this.guard(gen, { t: 'ready' });
     return true;
-  }
-
-  /** ネイティブの結果(最後の成功/失敗の時刻)を取り込む。時刻は結果が出た時刻そのもの=JS が止まっていた間も正しい */
-  private applyNativeHb(gen: number, st: NativeHeartbeatStatus): void {
-    if (gen !== this.gen || !this.hbNative) return;
-    let changed = false;
-    if (this.noteAliveAt(gen, st.lastOkAt)) changed = true;
-    if (st.consecutiveFailures > 0 && st.lastFailAt > (this.data.heartbeat?.at ?? 0) && st.lastFailAt >= st.lastOkAt) {
-      this.data = { ...this.data, heartbeat: { ok: false, at: st.lastFailAt } };
-      if (st.consecutiveFailures !== this.hbFailNoted) {
-        this.hbFailNoted = st.consecutiveFailures;
-        this.gnote(`ハートビート失敗(ネイティブ): ${st.lastError ?? '?'} 連続 ${st.consecutiveFailures} 回(最後の成功から ${st.lastOkAt ? st.lastFailAt - st.lastOkAt : '?'}ms。T_echo=${this.gov.timing.echoMs}ms で異常とみなす)`);
-      }
-      changed = true;
-    }
-    if (st.consecutiveFailures === 0) this.hbFailNoted = 0;
-    if (changed) this.set({});
-  }
-
-  /** 子機: Direct 上のエコー(親機の 9000)へ定期的に接続して生存を確かめる。親機側はこの接続の有無で子機の生存を見る */
-  private async heartbeatLoop(gen: number): Promise<void> {
-    const hb = this.hbMs();
-    let lastAt = this.p.now();
-    while (gen === this.gen) {
-      await this.p.sleep(hb);
-      if (gen !== this.gen) return;
-      if (!this.suspendOk || this.state.wifi !== 'joined' || !this.gateway) { lastAt = this.p.now(); continue; }
-      // バスが生きていれば(ネイティブの ping/pong が新しい)Echo は省く。バス接続が生存信号を兼ねる。旧版の親機・バス断のときは従来どおり Echo
-      if (this.busHoldsEcho()) { lastAt = this.p.now(); continue; }
-      if (this.hbNative) { lastAt = this.p.now(); continue; } // ネイティブが送っている間は JS からは送らない
-      const gap = this.p.now() - lastAt > hb * 2.5;
-      let res = await this.hotspot.probe(this.gateway, this.lastPort);
-      // 長く眠っていた直後の 1 回目の失敗は、回線が起き切っていないだけのことが多い: 数えずに 1 回やり直す
-      if (!res.ok && gap) {
-        this.gnote(`ハートビート: 間隔が空いたあとの失敗(${res.error ?? '?'}) → 数えずにやり直す`);
-        await this.p.sleep(1_000);
-        if (gen !== this.gen) return;
-        res = await this.hotspot.probe(this.gateway ?? '', this.lastPort);
-      }
-      lastAt = this.p.now();
-      if (gen !== this.gen) return;
-      if (res.ok) {
-        this.data = { ...this.data, heartbeat: { ok: true, at: lastAt }, okAt: lastAt };
-        this.guard(gen, { t: 'alive' });
-        if (this.gov.phase === 'nearby' && this.state.vpn === 'on' && !this.joining) this.guard(gen, { t: 'ready' });
-      } else {
-        this.data = { ...this.data, heartbeat: { ok: false, at: lastAt } };
-        this.gnote(`ハートビート失敗: ${res.error ?? '?'}(最後の成功から ${lastAt - (this.data.okAt ?? lastAt)}ms。T_echo=${this.gov.timing.echoMs}ms で異常とみなす)`);
-      }
-      this.set({});
-    }
   }
 
   // ---------- 制御バス(Direct 上の ZeroMQ。modules/hotspot の BusEngine) ----------
@@ -1650,7 +1514,7 @@ export class Tether {
   /** 親機: Direct のグループができたあとにバスを待ち受けさせる。返す番号は tether.wifi の busPort に載せる(null = 使わない) */
   private startBusHost(): number | null {
     const bus = this.p.bus;
-    if (!bus || !this.bus || !this.suspendOk || !this.busKey || !this.peerId || !this.busSelf) return null;
+    if (!bus || !this.bus || !this.busKey || !this.peerId || !this.busSelf) return null;
     try {
       if (this.busRunning) bus.stop();
       const t = this.busTiming();
@@ -1670,7 +1534,7 @@ export class Tether {
   /** 子機: 親機が busPort を渡してきたときだけ、Direct の親機へバスをつなぎ続ける(切れても再接続はネイティブが続ける) */
   private startBusGuest(gateway: string, busPort: number | undefined): void {
     const bus = this.p.bus;
-    if (!bus || !this.bus || !this.suspendOk || !busPort || !this.busKey || !this.peerId || !this.busSelf) return;
+    if (!bus || !this.bus || !busPort || !this.busKey || !this.peerId || !this.busSelf) return;
     try {
       if (this.busRunning) bus.stop();
       const bound = bus.start({ host: false, selfId: this.busSelf, peerId: this.peerId, keyHex: this.busKey, addr: gateway, port: busPort, ...this.busTiming() });
@@ -1682,6 +1546,25 @@ export class Tether {
       this.busRunning = false;
       this.log('[DH-BUS] 接続開始失敗(Nearby のまま): ' + (e?.message ?? e));
     }
+  }
+
+  /**
+   * 到達確認(子機): 親機の制御バスへつなぎ、認証が通るまで待つ。認証 = 正しい相手だと両側で確かめられた、の意味。
+   * バスが既に認証済みならすぐ OK。バスを持たない(旧版の)親機は到達を確かめられないので NG。
+   */
+  private async reachViaBus(gen: number, gateway: string, busPort: number | undefined): Promise<{ ok: boolean; rttMs?: number; error?: string }> {
+    if (!busPort) return { ok: false, error: 'バスに対応していない親機です(親機のアプリを更新してください)' };
+    if (!this.busRunning) this.startBusGuest(gateway, busPort);
+    if (!this.busRunning) return { ok: false, error: 'バスを開始できませんでした' };
+    const limit = this.cfg.busReachMs ?? 15_000;
+    const t0 = this.p.now();
+    while (gen === this.gen) {
+      if (this.data.bus === 'authenticated') return { ok: true, rttMs: this.p.now() - t0 };
+      if (this.p.now() - t0 >= limit) break;
+      await this.p.sleep(100);
+    }
+    if (gen !== this.gen) return { ok: false, error: 'stopped' };
+    return { ok: false, error: `バスの認証が ${limit}ms 以内に通りませんでした` };
   }
 
   private stopBus(why: string): void {
@@ -1739,17 +1622,6 @@ export class Tether {
     this.data = { ...this.data, bus: s };
   }
 
-  /**
-   * Echo を始めない/止めてよいか。バスが認証済みの間は常に true(生存信号はバスの aliveAt)。
-   * 起動直後・切断直後は grace(hb×2)のあいだ true のまま(結果待ち。tick ごとに Echo が start/stop するのを防ぐヒステリシス)。
-   * 切断が grace 続いたら false(Echo を再開)。
-   */
-  private busHoldsEcho(): boolean {
-    if (!this.busRunning) return false;
-    if (this.data.bus === 'authenticated') return true;
-    return this.p.now() - this.busChangedAt < this.hbMs() * 2;
-  }
-
   private onDirectGroup(gen: number, e: { up: boolean; clients: number; appInitiated?: boolean }): void {
     if (gen !== this.gen) return;
     if (e.appInitiated) { this.data = { ...this.data, group: false }; this.set({}); return; }
@@ -1761,45 +1633,17 @@ export class Tether {
     this.set({});
   }
 
-  private onEchoAccept(gen: number): void {
-    if (gen !== this.gen) return;
-    const now = this.p.now();
-    this.gov.noteAliveAt(now);
-    this.data = { ...this.data, echoAt: now, aliveAt: this.gov.lastAliveAt };
-    this.echoFirstAt ??= now;
-    this.echoCount++;
-    this.guard(gen, { t: 'alive' });
-    this.hostPeerReady('echo');
-    this.set({});
-  }
-
   /** 親機: 子機が Direct に届いた(到達確認の報告 or エコー受付)。両端末が suspend のときだけ Nearby を止める準備に入る */
   private hostPeerReady(via: string): void {
     if (!this.suspendOk || this.state.role !== 'host' || this.state.share !== 'on' || this.shareMsg?.method !== 'WifiDirect') return;
     if (via === 'bus') {
       // バスが認証済み = 子機はバスを持つ新しい版で(Echo の回数による推定は不要)
       if (!this.data.reach?.ok) this.data = { ...this.data, reach: { ok: true, at: this.p.now() } };
-    } else if (!this.peerReachKnown && !this.inferReachFromEcho(via)) return;
+    } else if (!this.peerReachKnown) return;
     if (this.gov.phase === 'nearby') {
       this.gnote(`子機が Direct に届いた(${via})`);
       this.guard(this.gen, { t: 'ready' });
     }
-  }
-
-  /**
-   * 子機の wifi-result(方式の報告)が届かないまま、Echo だけが届いたときの推定。
-   * 実機 b6 12:18: 子機が Direct に入ると Wi-Fi LAN 上の Nearby が切れ、子機の wifi-result が親機に届かなかった。
-   * 到達確認の probe も Echo に 1 回つながるが、ハートビート(子機が送る)は hb 間隔の半分以上あけて繰り返し来る。
-   * 報告が無いうちにそれが来たら、子機は suspend とみなす(あとで wifi-result が届けばそちらを優先)。
-   */
-  private inferReachFromEcho(via: string): boolean {
-    if (via !== 'echo' || this.peerReachKnown || this.echoFirstAt === null || this.echoCount < 2) return false;
-    if (this.p.now() - this.echoFirstAt < this.hbMs() / 2) return false;
-    this.peerReachKnown = true;
-    // 繰り返し届くハートビートは、子機が Direct に届いている証拠(到達確認の代わり)
-    if (!this.data.reach?.ok) this.data = { ...this.data, reach: { ok: true, at: this.p.now() } };
-    this.gnote(`子機の方式の報告(wifi-result)が未着のまま Echo が ${this.echoCount} 回届いた → 子機は suspend とみなす(Nearby 切断で報告が落ちた可能性)`);
-    return true;
   }
 
   private async suspendNearby(gen: number): Promise<void> {
@@ -1914,9 +1758,9 @@ export class Tether {
           if (done()) return;
           if (this.state.wifi === 'joined' && this.gateway) {
             // ハートビートが失敗しただけで Wi-Fi は残っている: まず到達を確かめ、だめなら入り直す
-            const r = await this.hotspot.probe(this.gateway, this.lastPort);
+            const r = await this.reachViaBus(gen, this.gateway, this.lastJoined?.busPort);
             if (done()) return;
-            if (r.ok) { this.gnote(`Direct 再接続 attempt=${i}/${rc.attempts}: 到達できた(Wi-Fi は維持)`); this.data = { ...this.data, heartbeat: { ok: true, at: this.p.now() }, okAt: this.p.now() }; this.retry = null; this.guard(gen, { t: 'alive' }); this.set({}); return; }
+            if (r.ok) { this.gnote(`Direct 再接続 attempt=${i}/${rc.attempts}: 到達できた(Wi-Fi は維持)`); this.retry = null; this.guard(gen, { t: 'alive' }); this.set({}); return; }
             try { this.safeStopVpn(); this.hotspot.leaveWifi(); } catch {}
             this.set({ wifi: 'off', vpn: 'off' });
           }

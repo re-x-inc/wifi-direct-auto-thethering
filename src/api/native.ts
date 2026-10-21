@@ -29,22 +29,12 @@ export function nativePlatform(): TetherPlatform {
       startSocks: (port, u, p) => Hotspot.startSocks(port, u, p),
       stopSocks: () => Hotspot.stopSocks(),
       socksSelfTest: (port, u, p) => Hotspot.socksSelfTest(port, u, p),
-      startEcho: (port) => Hotspot.startEcho(port),
-      stopEcho: () => Hotspot.stopEcho(),
       joinWifi: (s, p, t) => Hotspot.joinWifi(s, p, t ?? null),
       leaveWifi: () => Hotspot.leaveWifi(),
       wifiFrequency: () => Hotspot.wifiFrequency(),
       hasCellular: () => Hotspot.hasCellular(),
       bindToJoined: () => Hotspot.bindToJoined(),
       unbindProcess: () => Hotspot.unbindProcess(),
-      probe: (h, port) => Hotspot.probe(h, port),
-      heartbeatStart: (o) => Hotspot.heartbeatStart(o.host, o.port, o.intervalMs, o.timeoutMs, o.screenOffIntervalMs ?? 0, o.wakeLock ?? true),
-      heartbeatStop: () => Hotspot.heartbeatStop(),
-      heartbeatStatus: () => Hotspot.heartbeatStatus(),
-      onHeartbeat: (cb) => {
-        const sub = Hotspot.addListener('onHeartbeat', (e) => cb(e));
-        return () => sub.remove();
-      },
       externalProbeStart: (o) => Hotspot.externalProbeStart(o),
       externalProbeStop: () => Hotspot.externalProbeStop(),
       externalProbeStatus: () => Hotspot.externalProbeStatus(),
@@ -58,10 +48,6 @@ export function nativePlatform(): TetherPlatform {
       },
       onDirectGroup: (cb) => {
         const sub = Hotspot.addListener('onDirectGroup', (e) => cb(e));
-        return () => sub.remove();
-      },
-      onEchoAccept: (cb) => {
-        const sub = Hotspot.addListener('onEchoAccept', () => cb());
         return () => sub.remove();
       },
       onJoinPrompt: (cb) => {

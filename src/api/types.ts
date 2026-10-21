@@ -109,18 +109,6 @@ export interface MessageMeta {
 
 // ---- 端末側の部品(テストでは偽物に差し替える) ----
 
-export interface NativeHeartbeatStatus {
-  running: boolean;
-  lastAttemptAt: number;
-  lastOkAt: number;
-  lastFailAt: number;
-  lastError: string | null;
-  lastRttMs: number;
-  consecutiveFailures: number;
-  attempts: number;
-  intervalMs: number;
-}
-
 /** probe 供給元(ネイティブ)の 1 周ごとの結果。時刻は Date.now() と同じ時計(0 = まだ無い) */
 export interface NativeExternalProbeStatus {
   running: boolean;
@@ -161,8 +149,6 @@ export interface HotspotPort {
   startSocks(port: number, user: string, pass: string): Promise<{ network: 'cellular' | 'default' }>;
   stopSocks(): void;
   socksSelfTest(port: number, user: string, pass: string): Promise<{ ok: boolean; line?: string; error?: string; udp?: boolean }>;
-  startEcho(port: number): void;
-  stopEcho(): void;
   /** timeoutMs: 参加の待ち時間(省略は初回の承認待ちを見込んだ長い既定)。保存済みの接続情報での再接続は短く指定する */
   joinWifi(ssid: string, pass: string, timeoutMs?: number): Promise<{ gateway: string; reused?: boolean }>;
   leaveWifi(): void;
@@ -171,17 +157,6 @@ export interface HotspotPort {
   hasCellular(): boolean;
   bindToJoined(): boolean;
   unbindProcess(): void;
-  probe(host: string, port: number): Promise<{ ok: boolean; rttMs?: number; error?: string }>;
-  /**
-   * 子機: ハートビート(親機のエコーへの定期接続)をネイティブで続ける(省略可。無い部品では JS の heartbeatLoop で動く)。
-   * JS が止まっても(裏・画面オフ・Doze)続く。参加した Wi-Fi に bind して接続する(probe と同じ経路)。
-   */
-  heartbeatStart?(o: { host: string; port: number; intervalMs: number; timeoutMs: number; screenOffIntervalMs?: number; wakeLock?: boolean }): void;
-  heartbeatStop?(): void;
-  /** ネイティブが保持する最新の結果。時刻は Date.now() と同じ時計(0 = まだ無い) */
-  heartbeatStatus?(): NativeHeartbeatStatus;
-  /** ネイティブのハートビート結果が出るたび(JS が起きている間)。戻り値で購読解除 */
-  onHeartbeat?(cb: (st: NativeHeartbeatStatus) => void): () => void;
   /**
    * 子機: probe 供給元(ネイティブ)。省略可(無い部品では enable() だけでは動かず、update() を外から呼ぶ)。
    * 始めたら**すぐ 1 回**実行し、以後は間隔ごと(失敗の直後は確認間隔)。JS が止まっても動く
@@ -195,8 +170,6 @@ export interface HotspotPort {
   onWifiLost(cb: () => void): () => void;
   /** 親機: Direct グループの変化(消滅・クライアント数)。省略可(古いネイティブでは来ない=グループの有無は不明として扱う) */
   onDirectGroup?(cb: (e: { up: boolean; clients: number; appInitiated?: boolean }) => void): () => void;
-  /** 親機: エコー(9000)への子機の接続(子機のハートビート)。省略可 */
-  onEchoAccept?(cb: () => void): () => void;
   /**
    * 子機: 端末の Wi-Fi 接続許可の画面が出る/閉じる通知(省略可)。phase 'show' = 出ている。
    * ok/declined/timeout/cancelled = 終わり。戻り値で購読解除
@@ -251,16 +224,14 @@ export interface TetherConfig {
   /** 子機の到達確認の再試行(回数・間隔)。既定 10 回・2 秒 */
   probeRetries?: number;
   probeIntervalMs?: number;
+  /** 子機の到達確認: 親機の制御バス(ZMQ)の認証を待つ最長(ms)。既定 15000 */
+  busReachMs?: number;
   /** VPN 許可待ちの最長(秒)。既定 60 */
   vpnPermissionWaitSec?: number;
   /** 親機: 子機の能力を待つ最長時間(ms)。キャッシュがあれば待たない。既定 5000 */
   capsWaitMs?: number;
   /** true: Nearby/Direct の不変条件(src/link/linkGovernor.ts)に違反したら例外を投げる(テスト用)。既定 false=拒否して DH-LINK にログ */
   strictLinkGuard?: boolean;
-  /** 子機のハートビートを画面オフ中だけ延ばす間隔(ms)。省略=延ばさない。T_echo の半分を超えない範囲に丸める */
-  hbScreenOffIntervalMs?: number;
-  /** ネイティブのハートビートが動いている間 PARTIAL_WAKE_LOCK を保持するか。既定 true */
-  hbWakeLock?: boolean;
   /**
    * 時間の設定（開始待ち・タイムアウト・閾値。すべて任意）。範囲外は既定に丸めてログ、T_echo < T_direct < T_nearby は補正してログ。
    * 型・既定・範囲は src/link/timingConfig.ts。start() のたびに「既定 < ここ < setTimingOverride で保存した値」で決まり、

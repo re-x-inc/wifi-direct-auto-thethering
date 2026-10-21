@@ -25,12 +25,11 @@ async function setup(o: { internet?: object | null } = {}) {
   const f = await pairedFakes({ externalProbe: true }, { bus: true });
   const hostT = new Tether(f.host.platform, cfg);
   const guestT = new Tether(f.guest.platform, cfg);
-  let echo = true, pulse = true;
-  const echoTimer = setInterval(() => { if (echo && f.guest.ctl.probeOk) f.host.emitEcho(); }, 10);
+  let pulse = true;
   const pulseTimer = setInterval(() => { if (pulse && f.bus?.isUp()) f.bus.pulse(); }, 10);
   return {
-    ...f, hostT, guestT, stop: () => { echo = false; pulse = false; },
-    cleanup: () => { clearInterval(echoTimer); clearInterval(pulseTimer); hostT.stop(); guestT.stop(); },
+    ...f, hostT, guestT, stop: () => { pulse = false; },
+    cleanup: () => { clearInterval(pulseTimer); hostT.stop(); guestT.stop(); },
   };
 }
 type C = Awaited<ReturnType<typeof setup>>;
@@ -146,15 +145,15 @@ test('親機の設定(間隔・閾値・宛先)が子機に配られ、供給元
   c.cleanup();
 });
 
-test('延命の上限: Echo/バスが途絶えたあと、外形監視の成功だけの延命は T_direct までで打ち切る', async () => {
+test('延命の上限: バスが途絶えたあと、外形監視の成功だけの延命は T_direct までで打ち切る', async () => {
   const c = await setup();
   await established(c);
   await until(() => c.guestT.getState().internet.state === 'ok');
   // Echo もバスも途絶(報告の ack が生存信号を更新してしまわないよう、バスは切る)。外形監視の成功だけが続く
-  c.stop(); c.guest.ctl.probeOk = false; c.bus!.link(false);
+  c.stop(); c.bus!.link(false);
   await wait(30);
-  const d0 = (c.guestT as any).data;
-  const base = Math.max(d0.okAt ?? 0, d0.busAt ?? 0);
+  const base = (c.guestT as any).lastBusAt as number; // バスで最後に生存を確かめた時刻(延命の上限の基準)
+  assert.ok(base > 0, 'バスの生存時刻があること');
   let maxNet = 0;
   const t0 = Date.now();
   while (Date.now() - t0 < 450) {
