@@ -82,7 +82,6 @@ test('失敗 3 回で ng → overall degraded(両端)。報告はバスだけで
   assert.equal(c.guestT.getState().internet.state, 'ng');
   assert.equal(c.guestT.getState().internet.reason, 'upstream');
   assert.equal(c.guestT.getState().overall, 'degraded');
-  assert.equal(c.guestT.getState().overall === 'degraded' && c.guestT.getState().data.heartbeat?.ok !== false, true); // phase は動かない・生存は別
   await until(() => c.hostT.getState().remoteInternet?.state === 'ng', 2000, 'host sees ng');
   assert.equal(c.hostT.getState().remoteInternet?.reason, 'upstream');
   assert.equal(c.hostT.getState().overall, 'degraded');

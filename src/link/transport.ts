@@ -4,7 +4,7 @@ import type { LinkSupervisor, SendOptions } from './supervisor';
  * 端末間の「制御メッセージ」の通り道(tether.* と、アプリのメッセージ)。小さな抽象に留める。
  *
  * - いまの実装は NearbyControl(Nearby 上の LinkSupervisor)だけ。Direct が生きている間は Nearby を止めるので、その間は送れず、
- *   溜めて(supervisor の未確認キュー)Nearby 再開後にまとめて送る。heartbeat だけは Direct 上のエコー(9000)で行う。
+ *   溜めて(supervisor の未確認キュー)Nearby 再開後にまとめて送る。生存の確認(heartbeat)は Direct 上のバスで行う。
  * - **Direct 上の軽量なメッセージバス(WebSocket / NATS)と Gateway は別 PR。バスの実装はここに差す**:
  *   `class BusControl implements ControlTransport { kind = 'bus'; … }` を作り、Direct 稼働中はそれを、Nearby 稼働中は NearbyControl を使う。
  *   Tether は ControlTransport だけを見るので、unpair / guest-apps / 設定同期をバスへ移しても Tether 側の送受信は変わらない。

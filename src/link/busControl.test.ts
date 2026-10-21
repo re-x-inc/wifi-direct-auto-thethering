@@ -89,14 +89,14 @@ test('BusControl: アプリ ttl 切れは sweep で捨てて通知 / ttl=0 は�
   assert.deepEqual(ev, ['drop:z:ttl']);
 });
 
-test('lastAliveAt: Echo とバスのどちらか新しい方。deriveOverall に効く', () => {
-  const d = { ...initialDataPath(), group: true, echoAt: 1000, busAt: 1500, reach: { ok: true, at: 0 } };
-  assert.equal(lastAliveAt(d, 'host'), 1500);
-  assert.equal(lastAliveAt({ ...d, echoAt: 2000 }, 'host'), 2000);
-  assert.equal(lastAliveAt({ ...initialDataPath(), okAt: 700 }, 'guest'), 700);
+test('lastAliveAt: バス・外形監視・入口の最も新しい時刻。deriveOverall に効く', () => {
+  const d = { ...initialDataPath(), group: true, busAt: 1500, reach: { ok: true, at: 0 } };
+  assert.equal(lastAliveAt(d), 1500);
+  assert.equal(lastAliveAt({ ...d, netAt: 2000 }), 2000);
+  assert.equal(lastAliveAt({ ...initialDataPath(), aliveAt: 700 }), 700);
   const base = { role: 'host' as const, started: true, data: d, shareOn: true, wifiJoined: false, vpnOn: false, heartbeatMode: true, retrying: false, echoMs: 100, directMs: 400 };
-  assert.equal(deriveOverall({ ...base, now: 1550 }), 'connected'); // バスが新しい(Echo は 550ms 前)
+  assert.equal(deriveOverall({ ...base, now: 1550 }), 'connected'); // バスの生存が新しい
   assert.equal(deriveOverall({ ...base, now: 1700 }), 'degraded');
   assert.equal(deriveOverall({ ...base, now: 2000 }), 'disconnected');
-  assert.equal(deriveOverall({ ...base, data: { ...d, busAt: null }, now: 1050 }), 'connected');
+  assert.equal(deriveOverall({ ...base, data: { ...d, busAt: null }, now: 1050 }), 'degraded'); // 生存信号が無ければ確認できない
 });

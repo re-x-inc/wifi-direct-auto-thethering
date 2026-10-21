@@ -45,7 +45,7 @@ import {
  */
 type Wire =
   | { kind: 'tether.app'; body: unknown }
-  | { kind: 'tether.wifi'; method: 'WifiDirect' | 'LocalOnlyHotspot'; ssid: string; pass: string; port: number; socks: Socks;
+  | { kind: 'tether.wifi'; method: 'WifiDirect' | 'LocalOnlyHotspot'; ssid: string; pass: string; socks: Socks;
       /** 親機が Nearby を閉じて Direct グループを作り直す。子機も Nearby を閉じ、この情報で参加を繰り返し試す */
       rebuild?: boolean;
       /** 親機の制御バス(Direct 上の ZeroMQ)の待ち受けポート。無ければ(旧版の親機)バスは使わず Nearby のまま */
@@ -74,8 +74,7 @@ interface Socks {
 
 type WifiMsg = Extract<Wire, { kind: 'tether.wifi' }>;
 
-const ECHO_PORT = 9000;
-/** 制御バス(Direct 上)の待ち受けポート。Echo(9000)の隣 */
+/** 制御バス(Direct 上)の待ち受けポート */
 const BUS_PORT = 9001;
 /** バスの鍵の導出ラベル: K_bus = HMAC(共有コード, 'dh-bus/v1')。共有コード自体はネイティブへ渡さない */
 const BUS_KEY_LABEL = 'dh-bus/v1';
@@ -909,7 +908,7 @@ export class Tether {
     h.stopSocks();
     try { h.stopHotspot(); } catch {}
     this.nearbyDirectActive(false);
-    this.gov.forgetAlive(); this.lastBusAt = null; this.data = { ...this.data, group: null, echoAt: null, busAt: null, netAt: null, aliveAt: null, reach: null };
+    this.gov.forgetAlive(); this.lastBusAt = null; this.data = { ...this.data, group: null, busAt: null, netAt: null, aliveAt: null, reach: null };
     await h.stopDirect().catch(() => {});
     await this.p.sleep(1500);
     if (gen !== this.gen) return null;
@@ -991,7 +990,7 @@ export class Tether {
         // 親機が Wi-Fi に接続したまま Direct を作れた = STA+P2P の同時動作を観測
         if (staFreq > 0) void this.observe('staP2pConcurrent', true);
         const busPort = this.startBusHost();
-        return { kind: 'tether.wifi', method: 'WifiDirect', ssid: cred.ssid, pass: cred.passphrase, port: ECHO_PORT, socks, ...(busPort ? { busPort } : {}) };
+        return { kind: 'tether.wifi', method: 'WifiDirect', ssid: cred.ssid, pass: cred.passphrase, socks, ...(busPort ? { busPort } : {}) };
       } catch (e: any) {
         this.log(`Wi-Fi Direct 失敗(${describePlan(plan)}): ${e?.message ?? e} → 次の候補へ`);
         if (gen !== this.gen) return null;
@@ -1013,7 +1012,7 @@ export class Tether {
         void this.record('LocalOnlyHotspot', 'create', true);
         // 到達確認はバス(ZMQ)の認証で行うので、LocalOnlyHotspot でもバスを待ち受けて番号を渡す
         const busPort = this.startBusHost();
-        return { kind: 'tether.wifi', method: 'LocalOnlyHotspot', ssid: cred.ssid, pass: cred.passphrase, port: ECHO_PORT, socks, ...(busPort ? { busPort } : {}) };
+        return { kind: 'tether.wifi', method: 'LocalOnlyHotspot', ssid: cred.ssid, pass: cred.passphrase, socks, ...(busPort ? { busPort } : {}) };
       } catch (e: any) {
         this.log(`LocalOnlyHotspot 失敗 ${i}/3: ${e?.message ?? e}`);
         if (i < 3) await this.p.sleep(2000);
@@ -1131,7 +1130,7 @@ export class Tether {
     if (gen !== this.gen) return;
     this.nearbyDirectActive(false);
     this.safeStopVpn();
-    this.gov.forgetAlive(); this.lastBusAt = null; this.data = { ...this.data, group: false, heartbeat: null, okAt: null, busAt: null, netAt: null, aliveAt: null };
+    this.gov.forgetAlive(); this.lastBusAt = null; this.data = { ...this.data, group: false, busAt: null, netAt: null, aliveAt: null };
     this.monitor.setActive(false);
     this.stopBus('wifi-lost');
     this.gateway = null;
@@ -1690,7 +1689,7 @@ export class Tether {
     this.nearbySuspended = false;
     this.gov.markNearbyStopped(false);
     this.nearbyDirectActive(false);
-    this.gov.forgetAlive(); this.data = { ...this.data, echoAt: null, busAt: null, netAt: null, aliveAt: null };
+    this.gov.forgetAlive(); this.data = { ...this.data, busAt: null, netAt: null, aliveAt: null };
     this.gnote(`Nearby を再開(理由=${reason}, 停止中だった=${was}, group=${this.data.group}) → 広告・探索へ`);
     const go = () => {
       if (gen !== this.gen || seq !== this.suspendSeq || this.nearbySuspended) return;
@@ -1895,7 +1894,7 @@ export class Tether {
 }
 
 const sameWifi = (a: WifiMsg, b: WifiMsg) =>
-  a.ssid === b.ssid && a.pass === b.pass && a.port === b.port && a.socks.user === b.socks.user && a.socks.pass === b.socks.pass && a.socks.port === b.socks.port;
+  a.ssid === b.ssid && a.pass === b.pass && a.socks.user === b.socks.user && a.socks.pass === b.socks.pass && a.socks.port === b.socks.port;
 
 const DEVICE_ROLE_KEY = 'tether.deviceRole';
 /** hello の tv: 共有 timing(tether.timing)の版 */
