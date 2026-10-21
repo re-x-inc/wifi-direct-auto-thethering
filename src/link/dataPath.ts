@@ -27,6 +27,11 @@ export interface DataPath {
    */
   busAt: number | null;
   /**
+   * 外形監視(インターネットへの到達)が最後に成功した時刻(子機: 自分の観測 / 親機: 子機の ok の報告を受けた時刻)。
+   * 延命の出どころの 1 つ(上限つき: tether.ts の noteAliveAt)。無い・無効のとき null
+   */
+  netAt: number | null;
+  /**
    * 「最後に Direct の生存を確認した時刻」。**LinkGovernor が保持**する(送り手 = Echo・バス・ZMTP heartbeat に依存しない。
    * noteAliveAt の入口で max を取り、古い時刻へは戻さない)。画面・判定はこの値だけを読む。まだ無ければ null
    */
@@ -37,7 +42,7 @@ export interface DataPath {
 
 export type BusLinkState = 'off' | 'disconnected' | 'authenticated';
 
-export const initialDataPath = (): DataPath => ({ group: null, echoAt: null, heartbeat: null, okAt: null, reach: null, busAt: null, aliveAt: null, bus: 'off' });
+export const initialDataPath = (): DataPath => ({ group: null, echoAt: null, heartbeat: null, okAt: null, reach: null, busAt: null, netAt: null, aliveAt: null, bus: 'off' });
 
 const maxAt = (a: number | null | undefined, b: number | null | undefined): number | null =>
   a == null ? (b ?? null) : b == null ? a : Math.max(a, b);
@@ -49,7 +54,7 @@ const maxAt = (a: number | null | undefined, b: number | null | undefined): numb
  */
 export function lastAliveAt(d: DataPath, role: 'host' | 'guest'): number | null {
   const echo = role === 'host' ? d.echoAt : (d.okAt ?? (d.heartbeat?.ok ? d.heartbeat.at : null));
-  return maxAt(maxAt(echo, d.busAt), d.aliveAt);
+  return maxAt(maxAt(maxAt(echo, d.busAt), d.netAt), d.aliveAt);
 }
 
 export interface OverallInput {
@@ -73,6 +78,8 @@ export interface OverallInput {
    */
   echoMs: number;
   directMs: number;
+  /** 外形監視が ng(子機: 自分の観測 / 親機: 鮮度のある子機の報告)。生存確認が OK でも degraded にする。無効・未実施は false */
+  internetNg?: boolean;
 }
 
 /**
@@ -94,16 +101,17 @@ export function deriveOverall(i: OverallInput): Overall {
       if (age >= i.directMs) return 'disconnected';
       if (age >= i.echoMs) return 'degraded';
     }
-    return 'connected';
+    return i.internetNg ? 'degraded' : 'connected';
   }
   if (!i.wifiJoined || d.group === false) return 'disconnected';
   if (!i.vpnOn || d.reach?.ok === false) return 'degraded';
-  if (i.heartbeatMode && (d.heartbeat || d.busAt !== null || d.aliveAt !== null)) {
+  if (i.heartbeatMode && (d.heartbeat || d.busAt !== null || d.netAt !== null || d.aliveAt !== null)) {
     const age = i.now - (lastAliveAt(d, 'guest') as number);
     if (age >= i.directMs) return 'disconnected';
     // 直近の Echo 失敗でも、それより新しいバスの生存信号があれば異常とはしない
-    const echoBad = !!d.heartbeat && !d.heartbeat.ok && !(maxAt(d.busAt, d.aliveAt) !== null && (maxAt(d.busAt, d.aliveAt) as number) >= d.heartbeat.at);
+    const other = maxAt(maxAt(d.busAt, d.netAt), d.aliveAt);
+    const echoBad = !!d.heartbeat && !d.heartbeat.ok && !(other !== null && other >= d.heartbeat.at);
     if (echoBad || age >= i.echoMs) return 'degraded';
   }
-  return 'connected';
+  return i.internetNg ? 'degraded' : 'connected';
 }

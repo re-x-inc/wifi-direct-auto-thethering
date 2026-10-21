@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { linkSummary, nearbyErrorHint, pairingHeading, wifiJoinHint } from './connectText';
+import { internetText, linkSummary, nearbyErrorHint, pairingHeading, wifiJoinHint } from './connectText';
 
 test('8007 は無線をオンにする案内', () => {
   const t = nearbyErrorHint(8007);
@@ -36,4 +36,17 @@ test('ペアリング見出し', () => {
   assert.equal(pairingHeading({ confirm: false, found: true, connecting: true }), '相手とつないでいます');
   assert.equal(pairingHeading({ confirm: true, found: true }), '数字を確かめます');
   assert.equal(pairingHeading({ confirm: true, found: true, waiting: true }), '相手を待っています');
+});
+
+test('インターネット到達の文言: 状態ごとの見出し。子機の unknown は出さない。実装名を含まない', () => {
+  assert.equal(internetText('ok', null, 'guest')?.title, 'インターネットにつながっています');
+  assert.equal(internetText('ng', 'upstream', 'guest')?.title, '親機の回線につながっていません');
+  assert.equal(internetText('ng', 'portal', 'guest')?.title, '親機の回線で通信が制限されているかもしれません');
+  assert.equal(internetText('unknown', null, 'guest'), null);
+  assert.equal(internetText('ng', null, 'host')?.title, '子機がインターネットに出られていません');
+  assert.equal(internetText('unknown', null, 'host')?.title, '子機のインターネット: 確認中です');
+  for (const st of ['ok', 'ng', 'unknown'] as const) for (const w of ['guest', 'host'] as const) {
+    const t = internetText(st, 'dns', w);
+    assert.ok(!t || !/SOCKS|VPN|Direct|バス|probe/i.test(t.title + (t.note ?? '')));
+  }
 });

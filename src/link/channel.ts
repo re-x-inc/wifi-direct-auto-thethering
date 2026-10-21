@@ -1,11 +1,14 @@
 /**
  * 端末間メッセージの分類。
- *  - 'app': アプリのメッセージ(`tether.app` に包まれた tether.send の中身)。運び先は**バス(Direct)だけ**。Nearby には載せない
+ *  - 'app': アプリのメッセージ(`tether.app` に包まれた tether.send の中身)と、アプリメッセージ扱いの `tether.internet`(外形監視の報告)。運び先は**バス(Direct)だけ**。Nearby には載せない
  *  - 'ctl': tether 内部の制御(tether.wifi / hello / caps / timing / plan / need-wifi / unpair など)。従来の経路選択(Nearby / バス)
  */
 export type Channel = 'app' | 'ctl';
 
-export const channelOf = (body: unknown): Channel => ((body as { kind?: unknown } | null)?.kind === 'tether.app' ? 'app' : 'ctl');
+/** バス専用(アプリメッセージ扱い)の封筒の kind */
+export const BUS_ONLY_KINDS: readonly string[] = ['tether.app', 'tether.internet'];
+
+export const channelOf = (body: unknown): Channel => (BUS_ONLY_KINDS.includes((body as { kind?: unknown } | null)?.kind as string) ? 'app' : 'ctl');
 
 /** ログ用の種別名(中身は出さない)。制御は kind、アプリは body.kind → body.type の文字列。無ければ型名 */
 export function kindOf(body: unknown): string {

@@ -16,7 +16,7 @@ export const testRandomHex = (bytes: number) =>
   Array.from({ length: bytes }, () => ((n++ * 37 + 11) % 256).toString(16).padStart(2, '0')).join('');
 
 /** 端末の部品の偽物。呼び出しを calls に記録する。 */
-export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; directDelayMs?: number; joinError?: string; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[]; backgroundLocation?: boolean; nativeHeartbeat?: boolean; bus?: BusPort } = {}) {
+export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directFails?: boolean; directDelayMs?: number; joinError?: string; caps?: Partial<NativeCapabilities>; lohsProbe?: { ok: boolean; reason?: string }; model?: string; diagExtra?: Record<string, unknown>; missingPerms?: string[]; backgroundLocation?: boolean; nativeHeartbeat?: boolean; externalProbe?: boolean; bus?: BusPort } = {}) {
   const calls: string[] = [];
   const files: Record<string, string> = {};
   const wifiLost = new Set<() => void>();
@@ -33,6 +33,20 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     hbEmit: () => { for (const cb of hbCbs) cb({ ...ctl.hb }); },
   };
   const hbCbs = new Set<(st: typeof ctl.hb) => void>();
+  /** o.externalProbe のとき: 偽の probe 供給元。start されると**すぐ 1 周**実行し(xpOk の成否)、以後はテストが xpRound で進める */
+  const xp = { running: false, attempts: 0, lastAttemptAt: 0, lastOkAt: 0, lastFailAt: 0, lastReason: null as string | null, lastRttMs: -1, lastHttp: 0, consecutiveFailures: 0 };
+  const xpCbs = new Set<(st: typeof xp) => void>();
+  const xpCtl: { ok: boolean; reason: string; round: (ok?: boolean, reason?: string) => void } = {
+    ok: true, reason: 'upstream',
+    /** 1 周ぶんの結果を作って onExternalProbe を流す(ok を省略すると xpCtl.ok) */
+    round: (ok: boolean = xpCtl.ok, reason: string = xpCtl.reason) => {
+      const now = Date.now();
+      xp.attempts++; xp.lastAttemptAt = now;
+      if (ok) { xp.lastOkAt = now; xp.lastReason = null; xp.lastHttp = 204; xp.lastRttMs = 5; xp.consecutiveFailures = 0; }
+      else { xp.lastFailAt = now; xp.lastReason = reason; xp.lastHttp = 0; xp.consecutiveFailures++; }
+      for (const cb of xpCbs) cb({ ...xp });
+    },
+  };
   const hotspot: HotspotPort = {
     startHotspot: async () => (calls.push('startHotspot'), { ssid: 'AndroidShare_1', passphrase: 'lohspass' }),
     stopHotspot: () => void calls.push('stopHotspot'),
@@ -71,6 +85,16 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
       heartbeatStop: () => { calls.push('hbStop'); ctl.hb = { ...ctl.hb, running: false }; },
       heartbeatStatus: () => ({ ...ctl.hb }),
       onHeartbeat: (cb: (st: typeof ctl.hb) => void) => (hbCbs.add(cb), () => hbCbs.delete(cb)),
+    } : {}),
+    ...(o.externalProbe ? {
+      externalProbeStart: (a: { socksHost: string; socksPort: number; intervalMs: number; confirmIntervalMs: number; timeoutMs: number; failThreshold: number; urls: string[] }) => {
+        calls.push(`xpStart:${a.socksHost}:${a.socksPort}:${a.intervalMs}:${a.confirmIntervalMs}:${a.timeoutMs}:${a.failThreshold}:${a.urls.length}`);
+        xp.running = true;
+        xpCtl.round(); // 始めたらすぐ 1 周
+      },
+      externalProbeStop: () => { calls.push('xpStop'); xp.running = false; },
+      externalProbeStatus: () => ({ ...xp }),
+      onExternalProbe: (cb: (st: typeof xp) => void) => (xpCbs.add(cb), () => xpCbs.delete(cb)),
     } : {}),
     onJoinPrompt: (cb) => (joinPrompt.add(cb), () => joinPrompt.delete(cb)),
     onWifiLost: (cb) => (wifiLost.add(cb), () => wifiLost.delete(cb)),
@@ -124,13 +148,13 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))),
     now: () => Date.now(),
   };
-  return { platform, calls, files, vpnState, ctl,
+  return { platform, calls, files, vpnState, ctl, xp, xpCtl,
     emitGroup: (e: { up: boolean; clients: number; appInitiated?: boolean }) => groupCbs.forEach((cb) => cb(e)),
     emitEcho: () => echoCbs.forEach((cb) => cb()), emitJoinPrompt: (e: Parameters<typeof joinPrompt.add>[0] extends (x: infer E) => void ? E : never) => joinPrompt.forEach((cb) => cb(e)), loseWifi: () => wifiLost.forEach((cb) => cb()) };
 }
 
 /** 両端末に同じ共有コードのペアを入れた、親機・子機の偽プラットフォーム(fakeNearbyPair の端末名に合わせる) */
-export async function pairedFakes(guestOpts: { joinError?: string; nativeHeartbeat?: boolean } = {}, o: { bus?: boolean } = {}) {
+export async function pairedFakes(guestOpts: { joinError?: string; nativeHeartbeat?: boolean; externalProbe?: boolean } = {}, o: { bus?: boolean } = {}) {
   const net = fakeNearbyPair();
   /** o.bus: 両端末に Direct 上のバスの偽物を付ける(既定は付けない = 従来どおり Nearby だけ) */
   const bus = o.bus ? fakeBusPair() : null;
