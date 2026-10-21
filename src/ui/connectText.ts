@@ -53,6 +53,22 @@ export function linkSummary(phase: LinkPhase, hint?: string | null): { text: str
   }
 }
 
+/**
+ * インターネットへの到達(外形監視)の見出しと補足。実装名(SOCKS・VPN・Direct・バス・probe)は出さない。
+ * who: 'guest' = 子機が自分の状態を見る / 'host' = 親機が子機の報告を見る。unknown は項目を出さない(null)
+ */
+export function internetText(state: 'ok' | 'ng' | 'unknown', reason: string | null, who: 'guest' | 'host'): { title: string; note?: string; tone: Tone } | null {
+  if (who === 'host') {
+    if (state === 'ok') return { title: '子機のインターネット: 使えています', tone: 'ok' };
+    if (state === 'ng') return { title: '子機がインターネットに出られていません', note: '親機のモバイル通信を確認してください。', tone: 'warn' };
+    return { title: '子機のインターネット: 確認中です', tone: 'idle' };
+  }
+  if (state === 'ok') return { title: 'インターネットにつながっています', tone: 'ok' };
+  if (state === 'ng' && reason === 'portal') return { title: '親機の回線で通信が制限されているかもしれません', note: '契約や残りの容量を確認してください。', tone: 'warn' };
+  if (state === 'ng') return { title: '親機の回線につながっていません', note: '親機の電波やデータ容量を確認してください。', tone: 'warn' };
+  return null;
+}
+
 /** ペアリング画面の見出し */
 export function pairingHeading(p: { confirm: boolean; waiting?: boolean; connecting?: boolean; found: boolean }): string {
   if (p.confirm) return p.waiting ? '相手を待っています' : '数字を確かめます';

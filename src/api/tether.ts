@@ -10,6 +10,8 @@ import { LinkContext, LinkGovernor, LinkSnapshot } from '../link/linkGovernor';
 import { NearbyControl } from '../link/transport';
 import { BusControl, NO_BUS_PORT, BusEvent } from '../link/busControl';
 import { kindOf } from '../link/channel';
+import { InternetConfig, InternetMonitor } from '../link/internetMonitor';
+import { NativeProbeRunner } from './internetProbe';
 import { Carrier, RoutedControl, SendReport } from '../link/controlRouter';
 import type { NearbyApi } from '../link/nearbyTransport';
 import { Confirm, Found, PairingResult, PairingSession } from '../pairing/pairing';
@@ -59,7 +61,10 @@ type Wire =
   | { kind: 'tether.caps'; v: number; rev: string; caps: Capabilities }
   | { kind: 'tether.plan'; v: number; plan: LinkPlan }
   // 親機が正の時間設定（閾値の対応関係が崩れないよう、親機から子機へ配る）
-  | { kind: 'tether.timing'; v: 1; timing: Record<string, unknown> };
+  // probe = 外形監視の設定(間隔・閾値・宛先など。timing とは別セクション。無い/旧版の親機なら子機は自分の設定)
+  | { kind: 'tether.timing'; v: 1; timing: Record<string, unknown>; probe?: Record<string, unknown> }
+  // 子機→親機の外形監視の報告(アプリメッセージ扱い = バス専用。Nearby では送らない・受けない)
+  | { kind: 'tether.internet'; v: 1; state: string; okAt: number | null; at: number; seq: number; fails: number; reason: string | null; since: number };
 
 interface Socks {
   port: number;
@@ -162,6 +167,14 @@ export class Tether {
   private offHb: (() => void) | null = null;
   private hbFailNoted = 0;
   private overallSubs = new Set<(o: Overall, prev: Overall) => void>();
+  /** インターネット外形監視のコア(状態機械・報告・親機の受信)。probe の実装は持たない */
+  private monitor: InternetMonitor;
+  /** 既定の probe 供給元(ネイティブ)。enable() の runner で使うかを選ぶ */
+  private probeRunner: NativeProbeRunner;
+  private probeRunnerMode: 'native' | 'none' = 'native';
+  private netCapNoted = 0;
+  /** stop 処理中は監視の変化で set しない */
+  private quiet = false;
 
   constructor(private p: TetherPlatform, private cfg: TetherConfig = {}) {
     this.gov = new LinkGovernor({
@@ -177,9 +190,18 @@ export class Tether {
     try { p.onNativeLog?.((tag, line) => this.log(`[${tag}] ${line}`)); } catch {}
     // 前回の JS が suspend したまま再読み込みされても、ネイティブの Nearby を塞いだままにしない
     try { this.nearby.resume?.(); } catch {}
+    this.monitor = new InternetMonitor({
+      now: () => p.now(), log: (l) => this.gnote(l), role: () => this.state.role,
+      busUp: () => this.data.bus === 'authenticated',
+      noteAlive: (at) => this.noteAliveAt(this.gen, at, 'net'),
+      sendReport: (r) => this.ctl?.send(r satisfies Wire, { ttlMs: 0 }),
+      changed: () => { if (this.state.started && !this.quiet) this.set({}); },
+    });
+    this.probeRunner = new NativeProbeRunner(this.hotspot, (ok, at, reason) => void this.monitor.update(ok, at, reason), (l) => this.gnote(l));
     this.state = {
       started: false, role: null, autoRole: this.detectRole(), peer: null,
       link: 'stopped', attempt: 0, nearby: 'down', data: initialDataPath(), overall: 'disconnected', linkState: {} as LinkStateInfo,
+      internet: this.monitor.status, remoteInternet: null,
       share: 'off', shareMethod: null, peerReach: null,
       wifi: 'off', joinPrompt: false, joinFailure: null, vpn: 'off', plan: null, pending: 0, error: null,
     };
@@ -508,6 +530,7 @@ export class Tether {
       if (this.pairingBusy) return; // 待っている間にペアリングが始まった
       if (!granted) this.set({ error: '権限が許可されていません(Nearby・近くのデバイス・通知)' });
       await this.resolveTiming(role);
+      await this.resolveInternet();
       if (this.pairingBusy) return;
       const gen = ++this.gen;
       this.since = this.p.now();
@@ -619,6 +642,9 @@ export class Tether {
     this.offGroup?.(); this.offGroup = null;
     this.offEcho?.(); this.offEcho = null;
     this.stopNativeHb('stop');
+    this.probeRunner.stop('stop');
+    this.quiet = true;
+    try { this.monitor.setActive(false); this.monitor.reset('stop'); } finally { this.quiet = false; }
     this.suspendSeq++;
     if (this.nearbySuspended) { this.nearbySuspended = false; try { this.nearby.resume?.(); } catch {} }
     this.gov.reset();
@@ -644,6 +670,7 @@ export class Tether {
     this.todoDone.clear();
     const next: Partial<TetherState> = {
       started: false, role: null, peer: null, link: 'stopped', attempt: 0, nearby: 'down', data: initialDataPath(), overall: 'disconnected',
+      internet: this.monitor.status, remoteInternet: null,
       share: 'off', shareMethod: null, peerReach: null, wifi: 'off', joinPrompt: false, joinFailure: null, vpn: 'off', plan: null,
     };
     if (emit) this.set(next);
@@ -891,7 +918,7 @@ export class Tether {
     h.stopSocks();
     try { h.stopHotspot(); } catch {}
     this.nearbyDirectActive(false);
-    this.gov.forgetAlive(); this.data = { ...this.data, group: null, echoAt: null, busAt: null, aliveAt: null, reach: null };
+    this.gov.forgetAlive(); this.data = { ...this.data, group: null, echoAt: null, busAt: null, netAt: null, aliveAt: null, reach: null };
     await h.stopDirect().catch(() => {});
     await this.p.sleep(1500);
     if (gen !== this.gen) return null;
@@ -1077,7 +1104,16 @@ export class Tether {
         if (role === 'host') void this.onCaps(gen, peerId, body.v, body.rev, body.caps).catch((e) => this.log('caps 処理で例外: ' + (e?.message ?? e)));
         break;
       case 'tether.timing':
-        if (role === 'guest') this.adoptHostTiming(gen, body.timing);
+        if (role === 'guest') {
+          this.adoptHostTiming(gen, body.timing);
+          if (body.probe && typeof body.probe === 'object') this.monitor.adoptHost(body.probe);
+        }
+        break;
+      case 'tether.internet':
+        // 外形監視の報告はバスだけで運ぶ(アプリメッセージ扱い)。Nearby から来たものは受け付けない
+        if (role !== 'host') break;
+        if (from === 'nearby') { this.gnote('受信[外形監視] ← Nearby(破棄: バスのみ)'); break; }
+        this.monitor.receive(body);
         break;
       case 'tether.plan':
         if (role === 'guest') void this.onPlan(gen, body.plan).catch((e) => this.log('plan 処理で例外: ' + (e?.message ?? e)));
@@ -1104,7 +1140,8 @@ export class Tether {
     if (gen !== this.gen) return;
     this.nearbyDirectActive(false);
     this.safeStopVpn();
-    this.gov.forgetAlive(); this.data = { ...this.data, group: false, heartbeat: null, okAt: null, busAt: null, aliveAt: null };
+    this.gov.forgetAlive(); this.data = { ...this.data, group: false, heartbeat: null, okAt: null, busAt: null, netAt: null, aliveAt: null };
+    this.monitor.setActive(false);
     this.stopBus('wifi-lost');
     this.gateway = null;
     this.set({ wifi: 'off', vpn: this.vpnHold ? 'held' : 'off' });
@@ -1145,6 +1182,7 @@ export class Tether {
       this.data = { ...this.data, group: true };
       this.set({ wifi: 'joined' });
       this.nearbyDirectActive(true);
+      this.syncInternet(gen); // 参加できた直後に最初の外形監視をすぐ始める(到達確認・VPN 起動と並行)
       // 親機のポートが開くのが少し遅れることがあるので、一定間隔で再試行する
       const retries = this.cfg.probeRetries ?? 10;
       let res = await h.probe(gateway, m.port);
@@ -1228,6 +1266,60 @@ export class Tether {
     else await this.p.kv.set(TIMING_KEY, JSON.stringify(patch));
   }
 
+  // ---------- インターネット外形監視(公開の口は 2 つ: enable / update) ----------
+
+  /**
+   * インターネットへの到達の外形監視。tether は probe の実装を抱え込まず、結果を受ける 2 つの口だけを持つ(docs/EXTERNAL_PROBE.md)。
+   *  - `internet.enable(on, opts?)`: 有効/無効と設定(intervalMs・failThreshold・recoverThreshold など。opts.runner で既定の probe 供給元を使うか選ぶ)
+   *  - `internet.update(success, at?, reason?)`: 実際に通信できたか(供給元の結果でも、アプリが VPN 越しの実通信で観測した結果でもよい)
+   * 結果は state.internet(ok | ng | unknown)に出て、成功のたびに生存確認を延命し、親機へ報告(tether.internet。バス専用)される。
+   */
+  readonly internet = {
+    enable: (on: boolean, opts: Partial<Omit<InternetConfig, 'enabled'>> & { runner?: 'native' | 'none' } = {}): void => {
+      const { runner, ...cfg } = opts;
+      if (runner !== undefined) this.probeRunnerMode = runner === 'none' ? 'none' : 'native';
+      this.monitor.enable(on, cfg);
+      this.syncInternet(this.gen);
+    },
+    update: (success: boolean, at?: number, reason?: string): boolean => this.monitor.update(success, at, reason),
+    /** いま有効な設定(親機から配られた値を含む) */
+    getConfig: (): InternetConfig => this.monitor.config,
+  };
+
+  /** 開発・検証用: 外形監視の設定を保存して、次の start() から効かせる。null で消す */
+  async setInternetOverride(patch: Partial<InternetConfig> | null): Promise<void> {
+    if (patch === null) { if (this.p.kv.remove) await this.p.kv.remove(INTERNET_KEY); else await this.p.kv.set(INTERNET_KEY, ''); }
+    else await this.p.kv.set(INTERNET_KEY, JSON.stringify(patch));
+  }
+
+  private async resolveInternet(): Promise<void> {
+    let saved: Partial<InternetConfig> = {};
+    try {
+      const raw = await this.p.kv.get(INTERNET_KEY);
+      if (raw) saved = JSON.parse(raw);
+    } catch { saved = {}; }
+    this.monitor.configure({ ...(this.cfg.internet ?? {}), ...saved }, { unchecked: this.cfg.timingUnchecked });
+  }
+
+  /**
+   * 子機: 外形監視を、あるべき状態(有効・Wi-Fi 参加済み・再接続中でない)に合わせる。毎 tick と参加直後に呼ぶ。
+   * 既定の供給元(ネイティブ)はここで始め/止め、新しい結果を update に渡す。親機は監視しない(子機の報告を受けるだけ)。
+   */
+  private syncInternet(gen: number): void {
+    if (gen !== this.gen) return;
+    const guest = this.state.role === 'guest';
+    const phaseOk = this.gov.phase !== 'retrying' && this.gov.phase !== 'rejoining';
+    const want = guest && this.monitor.enabled && this.state.wifi === 'joined' && !!this.gateway && !!this.lastJoined && phaseOk && this.retry === null;
+    this.monitor.setActive(want);
+    this.monitor.tick();
+    if (!guest) return;
+    if (want && this.probeRunnerMode === 'native') {
+      const j = this.lastJoined as WifiMsg;
+      this.probeRunner.sync({ socksHost: this.gateway as string, socksPort: j.socks.port, user: j.socks.user, pass: j.socks.pass, cfg: this.monitor.config, wakeLock: this.cfg.hbWakeLock ?? true });
+      this.probeRunner.poll();
+    } else this.probeRunner.stop(want ? '供給元を使わない設定' : '不要になった(無効・未参加・再接続中)');
+  }
+
   private async resolveTiming(role: TetherRole): Promise<void> {
     let saved: Partial<LinkTimingConfig> = {};
     try {
@@ -1294,12 +1386,13 @@ export class Tether {
       directUp: s.role === 'host' ? s.share === 'on' && this.data.group !== false : s.wifi === 'joined',
       nearbyUp: s.link === 'connected', resumedBecause: this.resumedBecause, attempt: this.retry ? { n: this.retry.attempt, max: this.retry.max } : null,
       overall: s.overall, nearby: s.nearby, data: this.data, since: this.since, timing: { ...this.timing, guard: this.gov.timing },
+      internet: this.monitor.status, remoteInternet: this.monitor.remoteStatus,
     };
   }
 
   /** 親機が正の時間設定を子機へ配る(hello への返答。再接続でも送り直す) */
   private sendTiming(): void {
-    this.ctl?.send({ kind: 'tether.timing', v: 1, timing: { ...pickShared(this.timing) } } satisfies Wire, { key: 'timing', ttlMs: WIFI_TTL_MS });
+    this.ctl?.send({ kind: 'tether.timing', v: 1, timing: { ...pickShared(this.timing) }, probe: { ...this.monitor.config } } satisfies Wire, { key: 'timing', ttlMs: WIFI_TTL_MS });
   }
 
   /** 子機: 親機の共有の時間設定(閾値・hb・再接続)を採用する */
@@ -1385,6 +1478,7 @@ export class Tether {
       }
       last = t;
       this.syncBus(gen);
+      this.syncInternet(gen);
       this.bus?.sweep(); // 溜めたままの期限切れ(アプリのメッセージ)を捨てて記録する
       this.guard(gen, { t: 'tick' });
       const before = this.state.overall;
@@ -1447,11 +1541,21 @@ export class Tether {
    * (いまはネイティブの Echo ハートビート。Direct 上のバスの ping に置き換わっても、ここへ at を渡すだけでよい)。
    * 新しい時刻なら true。
    */
-  private noteAliveAt(gen: number, at: number, src: 'echo' | 'bus' = 'echo'): boolean {
+  private noteAliveAt(gen: number, at: number, src: 'echo' | 'bus' | 'net' = 'echo'): boolean {
     if (gen !== this.gen) return false;
     if (src === 'echo') {
       if (at <= (this.data.okAt ?? 0)) return false;
       this.data = { ...this.data, heartbeat: { ok: true, at }, okAt: at };
+    } else if (src === 'net') {
+      // 外形監視による延命(子機: 自分の観測 / 親機: 子機の ok の報告)。heartbeat 表示や ready の副作用は持たない。
+      // 上限: Echo・バスの最後の生存から T_direct を超えたら延命しない(制御の死を隠さない。docs/EXTERNAL_PROBE.md §2)
+      if (at <= (this.data.netAt ?? 0)) return false;
+      const base = Math.max(this.data.okAt ?? 0, this.data.busAt ?? 0, this.data.echoAt ?? 0);
+      if (base > 0 && at - base >= this.gov.timing.directMs) {
+        if (at - this.netCapNoted >= 60_000) { this.netCapNoted = at; this.gnote(`外形監視の成功では延命しない: Echo/バスの最後の生存から ${at - base}ms(上限 T_direct=${this.gov.timing.directMs}ms)`); }
+        return false;
+      }
+      this.data = { ...this.data, netAt: at };
     } else {
       if (at <= (this.data.busAt ?? 0)) return false;
       this.data = { ...this.data, busAt: at };
@@ -1462,7 +1566,7 @@ export class Tether {
     this.guard(gen, { t: 'alive' });
     const kept = this.gov.lastAliveAt;
     if (kept !== null) this.gov.setAliveAt(kept);
-    if (this.gov.phase === 'nearby' && this.state.vpn === 'on' && !this.joining) this.guard(gen, { t: 'ready' });
+    if (src !== 'net' && this.gov.phase === 'nearby' && this.state.vpn === 'on' && !this.joining) this.guard(gen, { t: 'ready' });
     return true;
   }
 
@@ -1585,6 +1689,7 @@ export class Tether {
     this.busRunning = false;
     this.busSeenUp = false;
     this.data = { ...this.data, busAt: null, bus: 'off' };
+    this.monitor.onBusDown();
     try { this.p.bus?.stop(); } catch {}
     this.log(`[DH-BUS] 停止(${why})`);
     this.ctl?.reconcile();
@@ -1601,6 +1706,7 @@ export class Tether {
       this.ctl?.reconcile();
     } else {
       this.setBusState('disconnected');
+      this.monitor.onBusDown();
       this.gnote(`バス切断(${reason}): 溜まった分は再接続後に送る。Nearby は止めたまま、バスの再接続を先に待つ`);
       // 生存信号は更新しない。時間が経っても戻らなければ T_echo / T_direct の判定が進む(Nearby に戻るのは governor の判断だけ)
     }
@@ -1721,7 +1827,7 @@ export class Tether {
     this.nearbySuspended = false;
     this.gov.markNearbyStopped(false);
     this.nearbyDirectActive(false);
-    this.gov.forgetAlive(); this.data = { ...this.data, echoAt: null, busAt: null, aliveAt: null };
+    this.gov.forgetAlive(); this.data = { ...this.data, echoAt: null, busAt: null, netAt: null, aliveAt: null };
     this.gnote(`Nearby を再開(理由=${reason}, 停止中だった=${was}, group=${this.data.group}) → 広告・探索へ`);
     const go = () => {
       if (gen !== this.gen || seq !== this.suspendSeq || this.nearbySuspended) return;
@@ -1905,8 +2011,9 @@ export class Tether {
     const overall = deriveOverall({
       role: s.role, started: s.started, data: this.data, shareOn: s.share === 'on', wifiJoined: s.wifi === 'joined', vpnOn: s.vpn === 'on',
       heartbeatMode: this.suspendOk, retrying: this.retry !== null, now: this.p.now(), echoMs: this.gov.timing.echoMs, directMs: this.gov.timing.directMs,
+      internetNg: this.monitor.isNg(s.role),
     });
-    this.state = { ...s, nearby, overall, data: { ...this.data } };
+    this.state = { ...s, nearby, overall, data: { ...this.data }, internet: this.monitor.status, remoteInternet: this.monitor.remoteStatus };
     this.state.linkState = this.gov.snapshot().state;
   }
 
@@ -1930,6 +2037,7 @@ const sameWifi = (a: WifiMsg, b: WifiMsg) =>
 const DEVICE_ROLE_KEY = 'tether.deviceRole';
 /** hello の tv: 共有 timing(tether.timing)の版 */
 const TIMING_KEY = 'tether.timing.v1';
+const INTERNET_KEY = 'tether.internet.v1';
 
 const safeFreq = (h: { wifiFrequency(): number }): number => {
   try { return h.wifiFrequency(); } catch { return 0; }

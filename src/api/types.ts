@@ -9,6 +9,9 @@ import type { CapabilityPort } from './capability';
 import type { JoinFailure } from './joinFailure';
 import type { LinkPlan, PlanPolicy } from './planner';
 import type { BusPort } from '../link/busControl';
+import type { InternetConfig, InternetStatus, RemoteInternet } from '../link/internetMonitor';
+export type { InternetConfig, InternetStatus, RemoteInternet };
+export type { InternetReason, InternetStateName } from '../link/internetMonitor';
 
 export type { SendOptions };
 export type { Confirm, Found, PairingResult } from '../pairing/pairing';
@@ -64,6 +67,13 @@ export interface TetherState {
    */
   overall: Overall;
   /**
+   * 子機: インターネットへの到達(外形監視)。overall とは別の軸。ok / ng / unknown(未判定・無効・判定できない)。
+   * 親機は常に unknown(親機は監視しない。子機の報告は remoteInternet)
+   */
+  internet: InternetStatus;
+  /** 親機: 子機が報告したインターネットへの到達。報告が無い・途絶・バス断・無効のとき null か state=unknown */
+  remoteInternet: RemoteInternet | null;
+  /**
    * 画面用の「いまの状態」（内部名・日本語ラベル・経過秒・次の遷移までの残り・再接続 n/3）。履歴など全体は tether.linkSnapshot() / onLink()。
    * 後方互換のため追加のみ。
    */
@@ -111,6 +121,38 @@ export interface NativeHeartbeatStatus {
   intervalMs: number;
 }
 
+/** probe 供給元(ネイティブ)の 1 周ごとの結果。時刻は Date.now() と同じ時計(0 = まだ無い) */
+export interface NativeExternalProbeStatus {
+  running: boolean;
+  /** 試行した回数(増えたら新しい結果がある) */
+  attempts: number;
+  lastAttemptAt: number;
+  lastOkAt: number;
+  lastFailAt: number;
+  /** 直近の失敗の分類(InternetReason)。成功のとき null */
+  lastReason: string | null;
+  lastRttMs: number;
+  /** 直近の HTTP ステータス(0 = 応答なし) */
+  lastHttp: number;
+  consecutiveFailures: number;
+}
+
+export interface ExternalProbeStartOptions {
+  /** 親機の中継(SOCKS5)。ネイティブは参加した Wi-Fi の Network でここへ直接つなぐ */
+  socksHost: string;
+  socksPort: number;
+  user: string;
+  pass: string;
+  /** 平文 http の generate_204。どれか 1 つが 204 なら成功 */
+  urls: string[];
+  intervalMs: number;
+  screenOffIntervalMs: number;
+  confirmIntervalMs: number;
+  timeoutMs: number;
+  failThreshold: number;
+  wakeLock: boolean;
+}
+
 export interface HotspotPort {
   startHotspot(): Promise<{ ssid: string; passphrase: string }>;
   stopHotspot(): void;
@@ -140,6 +182,15 @@ export interface HotspotPort {
   heartbeatStatus?(): NativeHeartbeatStatus;
   /** ネイティブのハートビート結果が出るたび(JS が起きている間)。戻り値で購読解除 */
   onHeartbeat?(cb: (st: NativeHeartbeatStatus) => void): () => void;
+  /**
+   * 子機: probe 供給元(ネイティブ)。省略可(無い部品では enable() だけでは動かず、update() を外から呼ぶ)。
+   * 始めたら**すぐ 1 回**実行し、以後は間隔ごと(失敗の直後は確認間隔)。JS が止まっても動く
+   */
+  externalProbeStart?(o: ExternalProbeStartOptions): void;
+  externalProbeStop?(): void;
+  externalProbeStatus?(): NativeExternalProbeStatus;
+  /** 1 周終わるたび(JS が起きている間)。戻り値で購読解除 */
+  onExternalProbe?(cb: (st: NativeExternalProbeStatus) => void): () => void;
   /** Wi-Fi 切断(参加先が消えた)の通知。戻り値で購読解除 */
   onWifiLost(cb: () => void): () => void;
   /** 親機: Direct グループの変化(消滅・クライアント数)。省略可(古いネイティブでは来ない=グループの有無は不明として扱う) */
@@ -218,6 +269,11 @@ export interface TetherConfig {
   timing?: Partial<LinkTimingConfig>;
   /** true: timing の範囲チェックを省く（テスト用に短い時間を使う） */
   timingUnchecked?: boolean;
+  /**
+   * インターネット外形監視の設定(すべて任意。型・既定・範囲は src/link/internetMonitor.ts)。start() のたびに
+   * 「既定 < ここ < setInternetOverride で保存した値 < enable() で渡した値」で決まり、子機は親機の値(間隔・閾値・宛先)に揃える
+   */
+  internet?: Partial<InternetConfig>;
   /** 方式判断の方針(台数の上限・既存接続の扱いなど) */
   planPolicy?: Partial<PlanPolicy>;
 }

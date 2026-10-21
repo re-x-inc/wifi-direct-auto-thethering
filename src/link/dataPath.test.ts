@@ -48,3 +48,13 @@ test('Direct 再接続中は degraded(尽きれば retrying が外れて disconn
 test('suspend 未対応の旧部品(heartbeatMode=false)ではエコーの鮮度を見ない', () => {
   assert.equal(deriveOverall(base({ heartbeatMode: false, data: d({ group: true, reach: { ok: true, at: 1 } }) })), 'connected');
 });
+
+test('外形監視: 生存確認が OK でも internet = ng なら degraded(両端)。netAt は生存の出どころ', () => {
+  const host = d({ group: true, reach: { ok: true, at: 1 }, echoAt: 99_000 });
+  assert.equal(deriveOverall(base({ data: host, internetNg: true })), 'degraded');
+  assert.equal(deriveOverall(base({ data: host, internetNg: false })), 'connected');
+  const guest = base({ role: 'guest', wifiJoined: true, vpnOn: true, data: d({ group: true, netAt: 99_000 }) });
+  assert.equal(deriveOverall(guest), 'connected'); // netAt だけでも生存(Echo/バスが無くても)
+  assert.equal(deriveOverall({ ...guest, internetNg: true }), 'degraded');
+  assert.equal(deriveOverall({ ...guest, data: d({ group: true, netAt: 60_000 }), internetNg: false }), 'disconnected'); // T_direct 超
+});

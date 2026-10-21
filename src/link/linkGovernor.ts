@@ -2,6 +2,7 @@ import type { NearbyApi } from './nearbyTransport';
 import { GuardAction, GuardEvent, GuardPhase, GuardState, GuardTiming, initialGuard, nearbyShouldBeOff, stepGuard } from './directGuard';
 import type { HotspotPort } from '../api/types';
 import type { DataPath, NearbyPhase, Overall } from './dataPath';
+import type { InternetStatus, RemoteInternet } from './internetMonitor';
 import { labelOf, LinkStateInfo, LinkStateName, Transition, WaitingFor } from './stateLabels';
 
 /** 画面表示用に Tether が渡す、状態機械の外側の情報 */
@@ -28,6 +29,9 @@ export interface LinkContext {
   since: number;
   /** 有効な設定値（resolveTiming の結果と GuardTiming）。秘密を含まない */
   timing: unknown;
+  /** 外形監視(子機の自分の状態 / 親機が受けた子機の報告)。省略時は unknown / null */
+  internet?: InternetStatus;
+  remoteInternet?: RemoteInternet | null;
 }
 
 export interface LinkSnapshot {
@@ -41,6 +45,10 @@ export interface LinkSnapshot {
     bus: DataPath['bus'] };
   /** データ経路の内訳(state.data と同じ値。lastAliveAt / bus を含む) */
   data: DataPath | null;
+  /** インターネットへの到達(外形監視)。overall とは別の軸。state.internet と同じ値 */
+  internet: InternetStatus | null;
+  /** 親機: 子機の報告 */
+  remoteInternet: RemoteInternet | null;
   /** 直近の遷移（古い順、最大 HISTORY_MAX 件）。秘密・SSID・パスは含まない */
   history: Transition[];
   timing: unknown;
@@ -241,6 +249,7 @@ export class LinkGovernor {
       state, overall: c?.overall ?? 'disconnected',
       path: { nearby: c?.nearby ?? 'down', group: d?.group ?? null, echoAt: d?.echoAt ?? null, reach: d?.reach ?? null, heartbeat: d?.heartbeat ?? null, lastAliveAt: this.aliveMax || null, bus: d?.bus ?? 'off' },
       data: d ? { ...d, aliveAt: this.aliveMax || d.aliveAt } : null,
+      internet: c?.internet ?? null, remoteInternet: c?.remoteInternet ?? null,
       history: [...this.hist], timing: c?.timing ?? tm, at: now,
       controlCarrier: c?.carriers?.control ?? 'nearby', appCarrier: 'bus', appPending: c?.carriers?.appPending ?? 0,
     };
