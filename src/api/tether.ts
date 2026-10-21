@@ -1342,17 +1342,25 @@ export class Tether {
     this.gnote(`ネイティブのハートビート停止(${why})`);
   }
 
+  /**
+   * 生存信号の最終成功時刻(lastAliveAt)を governor に入れる唯一の入口。送信元は問わない
+   * (いまはネイティブの Echo ハートビート。Direct 上のバスの ping に置き換わっても、ここへ at を渡すだけでよい)。
+   * 新しい時刻なら true。
+   */
+  private noteAliveAt(gen: number, at: number): boolean {
+    if (gen !== this.gen || at <= (this.data.okAt ?? 0)) return false;
+    this.data = { ...this.data, heartbeat: { ok: true, at }, okAt: at };
+    this.guard(gen, { t: 'alive' });
+    this.gov.setAliveAt(at);
+    if (this.gov.phase === 'nearby' && this.state.vpn === 'on' && !this.joining) this.guard(gen, { t: 'ready' });
+    return true;
+  }
+
   /** ネイティブの結果(最後の成功/失敗の時刻)を取り込む。時刻は結果が出た時刻そのもの=JS が止まっていた間も正しい */
   private applyNativeHb(gen: number, st: NativeHeartbeatStatus): void {
     if (gen !== this.gen || !this.hbNative) return;
     let changed = false;
-    if (st.lastOkAt > (this.data.okAt ?? 0)) {
-      this.data = { ...this.data, heartbeat: { ok: true, at: st.lastOkAt }, okAt: st.lastOkAt };
-      this.guard(gen, { t: 'alive' });
-      this.gov.setAliveAt(st.lastOkAt);
-      if (this.gov.phase === 'nearby' && this.state.vpn === 'on' && !this.joining) this.guard(gen, { t: 'ready' });
-      changed = true;
-    }
+    if (this.noteAliveAt(gen, st.lastOkAt)) changed = true;
     if (st.consecutiveFailures > 0 && st.lastFailAt > (this.data.heartbeat?.at ?? 0) && st.lastFailAt >= st.lastOkAt) {
       this.data = { ...this.data, heartbeat: { ok: false, at: st.lastFailAt } };
       if (st.consecutiveFailures !== this.hbFailNoted) {
