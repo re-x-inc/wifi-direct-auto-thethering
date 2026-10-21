@@ -15,17 +15,27 @@ Direct の固定グループが生きている最中に Nearby が(再)接続す
 基準時刻は「最後に Direct の生存を確認した時刻」(親機 = 子機のエコー接続を最後に受けた時刻、子機 = 自分のハートビートが最後に成功した時刻)。
 Wi-Fi 切断・グループ消滅のように切れたと確定した場合は、その検知時刻。ハートビート間隔 hb(既定 5 秒、子機がエコー 9000 へ接続)から決める。
 
-| 名前 | 既定 | 意味 | 総合状態 |
-|---|---|---|---|
-| hb | 5s | 子機がエコー(親機の 9000)へ接続する間隔。親機はこの接続の有無で子機の生存を見る | |
-| T_echo | 15s (hb×3) | 生存信号が途切れた → データ経路の異常。Nearby は止めたまま Direct の復帰を試す(再接続 最大3回) | degraded |
-| T_direct | 150s (T_echo + 3×45s) | ここまでに戻らなければ Direct を諦める。**親機**はここで Nearby を再開(広告・探索) | disconnected |
-| T_nearby | 165s (T_direct + T_echo) | **子機**はここで Nearby の探索を始める。親機の再開(T_direct)より 15 秒後 | disconnected |
+| 名前 | 設定名(`TetherConfig.timing.*`) | 既定 | 意味 | 総合状態 |
+|---|---|---|---|---|
+| hb | `hbIntervalMs` | 5s | 子機がエコー(親機の 9000)へ接続する間隔。親機はこの接続の有無で子機の生存を見る | |
+| T_echo | `echoMs` | 15s (hb×3) | 生存信号が途切れた → データ経路の異常。Nearby は止めたまま Direct の復帰を試す(再接続 最大3回) | degraded |
+| T_direct | `directMs` | 150s (T_echo + 3×45s) | ここまでに戻らなければ Direct を諦める。**親機**はここで Nearby を再開(広告・探索) | disconnected |
+| T_nearby | `nearbyMs` | 165s (T_direct + T_echo) | **子機**はここで Nearby の探索を始める。親機の再開(T_direct)より 15 秒後 | disconnected |
+| 開始待ち(安定待ち) | `settleMs` | 3s | Direct 確立を確認してから Nearby を止めるまで | |
+| 再接続の回数 | `retryAttempts` | 3 | Nearby に戻る前の Direct 再接続 | degraded |
+| 再接続の前の待ち | `retryBackoffMs` | [1s, 2s, 4s] | i 回目の前の待ち | |
+| 再接続1回の参加待ち | `retryJoinTimeoutMs` | 40s | 保存済みの接続情報での joinWifi の待ち | |
+| 再接続1回の見込み | `retryAttemptMs` | 45s | T_direct の既定の計算に使う | |
+| 作り直しの待ち | `rejoinMs` | 60s(子機 +15s) | Nearby 経由の再接続で、相手が Direct に戻るのを待つ | |
+| Nearby 再開前の待ち | `nearbyResumeDelayMs` | 0 | 切れ確定から Nearby 再開までの追加の待ち | |
+| グループ再作成前の待ち | `groupRebuildDelayMs` | 0 | Nearby を閉じ終えてから固定グループを作るまでの追加の待ち | |
+| Nearby 再開後の再試行 | `nearbyRetryBaseMs` / `nearbyRetryMaxMs` | 1s → 上限 30s | LinkSupervisor の指数バックオフ。親機アプリが落ちていても子機は上限間隔で探索を続け、復帰後に再接続する | |
+| 初回の Direct 参加 | `joinTimeoutMs` | 180s | 承認ダイアログを含む(JOIN_TIMEOUT_MS) | |
+| 判定周期 | `tickMs` | 1s | 状態機械の tick | |
 
 - 親機の戻り(150s) ≤ 子機の探索開始(165s)。子機が、広告していない親機を探し続ける時間を作らない。Nearby は 135 秒以上経ってから始まる。
 - 親機は再接続(固定グループの作り直し)を3回使い切ったら T_direct を待たずに Nearby を再開してよい(早く戻る分には子機より先で良い)。子機は使い切っても T_nearby まで待つ。
 - 再接続1回 = 待ち(1s / 2s / 4s)+ 参加の待ち 40s(保存済みの接続情報なら承認ダイアログは出ず、通常は数秒)。最悪 (1+40)+(2+40)+(4+40) = 127s ≤ 135s(= T_direct − T_echo)。
-- すべて `TetherConfig.directGuard`(echoMs / directMs / nearbyMs / hbIntervalMs / tickMs …)と `TetherConfig.directRetry`(attempts / backoffMs / joinTimeoutMs / attemptMs)で変えられる。
 - Nearby 開始後の再試行は従来どおり(LinkSupervisor の指数バックオフ 1s→上限 30s、1 回の接続の待ち 30s、8012/8009 は native の後始末 1.5s のあと探索からやり直し、省電力は 120s 後から 60s 周期)。親機アプリが落ちた場合でも、子機は探索を続け(上限 30s の間隔)、親機が戻れば再接続できる。
 
 ## 状態遷移(親機)
@@ -119,6 +129,8 @@ classDiagram
     }
     class LinkGovernor {
       +state: GuardState
+      +snapshot() LinkSnapshot
+      +subscribe(cb)
       +nearbyAllowed: boolean
       +dispatch(GuardEvent)
       +wrapNearby(api) NearbyApi
@@ -172,3 +184,38 @@ Direct 稼働中に送れるのは echo 上の heartbeat だけ。それ以外�
 | ペア追加 | `beginPairing` が `stop()` するので Direct も止まる(従来どおり) | 変更なし |
 
 **Direct 上の軽量メッセージバス(WebSocket / NATS)と Gateway は別 PR。** `src/link/transport.ts` の `ControlTransport` に `BusControl` を差す。
+
+## 時間の設定(`TetherConfig.timing`)
+
+型・既定・範囲は `src/link/timingConfig.ts`。決め方:
+
+1. 既定 → `TetherConfig.timing`(アプリが渡す)→ 開発・検証用の保存値(`tether.setTimingOverride({...})` が kv(SecureStore)に保存し、**次の `start()`** から効く。再ビルド不要。`null` で消す)の順に重ねる。
+2. 範囲外・不正値(`NaN`、下限未満など)は既定に丸めてログ(`DH-LINK timing: …`)。T_echo は hb×3、T_direct は T_echo + 回数×attemptMs、T_nearby は T_direct + T_echo が既定。
+3. 大小関係 `T_echo < T_direct < T_nearby` が破れたら補正してログ(T_direct ≤ T_echo → T_echo×2、T_nearby ≤ T_direct → T_direct + T_echo)。再接続が `T_direct − T_echo` に収まらない設定は注意をログに出す(補正はしない)。
+4. `start()` ごとに、実際に使う値を `DH-LINK timing role=… {…}` として 1 回ログに出す。
+5. **親機が正**: suspend 方式では親機が接続のたびに共有分(`hbIntervalMs / echoMs / directMs / nearbyMs / settleMs / retry* / rejoinMs`)を `tether.timing` で子機へ配り、子機は自分の値を上書きして採用する(`DH-LINK timing 親機の設定を採用`)。理由: 「親機の戻り ≤ 子機の探索開始」は両端末の値の対応で成り立つので、端末ごとに設定が食い違うと子機が先に探索へ戻る。`tickMs / joinTimeoutMs / nearbyRetry* / *DelayMs` は端末ごと。
+   配布手段の比較: (a)アプリが `TetherConfig` を渡す ─ 両端末に同じ値を入れる運用が要り食い違いやすい / (b)保存値を起動時に読む ─ 再ビルド不要だが端末ごと / (c)親機→子機へ制御メッセージで配る(採用)─ 親機に入れれば揃う。Direct 稼働中は Nearby が止まるので、配るのは Nearby でつながっている間(確立前・再接続時)。Direct 上のバスができたら、バス経由で稼働中にも配れる。
+
+## 画面に出す状態(`tether.linkSnapshot()` / `onLink(cb)` / `state.linkState`)
+
+`state.linkState`(= `snapshot().state`)は既存の `subscribe` でそのまま流れる(`useTether` が受ける `TetherState` に追加のみ)。全体は `linkSnapshot()`、購読は `onLink(cb)`。
+
+| 内部名 | 日本語ラベル(`LINK_LABELS`。i18n はこの表だけ差し替える) | 状態機械の phase / 条件 | 待っているもの(`waiting.for`) |
+|---|---|---|---|
+| stopped | 停止中 | 未開始 | — |
+| keep-mode | Nearby と Direct を併用中 | keep 方式で Direct が張れている | — |
+| nearby-searching | Nearby で探しています | 子機・Nearby 未接続 | — |
+| nearby-waiting | Nearby で待っています | 親機・Nearby 未接続(広告中) | — |
+| nearby-connected | Nearby でつながっています | Nearby 接続中・Direct 未確立 | — |
+| nearby-resumed | Direct が切れたため Nearby で探しています | 再接続を尽くして Nearby を再開した直後 | — |
+| direct-creating | Direct を作っています | 親機 share=starting | — |
+| direct-joining | Direct に参加しています | 子機 wifi=joining | — |
+| direct-settling | Direct を確認しています | settling | settle |
+| direct-active | Direct 接続中 | direct(Nearby 停止中) | T_echo |
+| direct-retrying | Direct 再接続中 {n}/{max} | retrying | T_direct(親機)/ T_nearby(子機) |
+| direct-rebuilding | Direct を作り直しています | rejoining | rejoin |
+
+`LinkSnapshot`: `state`(name / label / phase / enteredAt / elapsedSec / waiting{for, deadlineAt(epoch ms), remainingMs} / attempt{n,max})、`overall`、
+`path`(nearby up|down|suspended / group / echoAt / reach / heartbeat)、`history`(直近 50 件の遷移: at / from / to / event / reason。SSID・パス・共有コードは含まない)、`timing`(有効な設定値と状態機械の時間)。
+
+画面の想定: ホームの接続行 = `state.label` + `overall`(色)/ 待つ画面 = `label` と `waiting.deadlineAt` のカウントダウン、再接続中は `attempt` / 診断画面 = `history` と `path`・`timing` の一覧。

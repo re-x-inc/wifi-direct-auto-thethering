@@ -18,8 +18,8 @@ const SUSPEND = {
   link: { baseMs: 5, maxMs: 20, pingTimeoutMs: 400 }, connectTimeoutMs: 100, probeIntervalMs: 1,
   nearbyWhileDirect: 'suspend' as const,
   strictLinkGuard: true, // 不変条件に違反したら例外(= テスト失敗)
-  directGuard: { hbIntervalMs: 20, tickMs: 10, echoMs: 60, directMs: 200, nearbyMs: 260, settleMs: 30 },
-  directRetry: { attempts: 3, backoffMs: [5], joinTimeoutMs: 50, attemptMs: 50 },
+  timingUnchecked: true,
+  timing: { hbIntervalMs: 20, tickMs: 10, echoMs: 60, directMs: 200, nearbyMs: 260, settleMs: 30, retryAttempts: 3, retryBackoffMs: [5], retryJoinTimeoutMs: 50, retryAttemptMs: 50, rejoinMs: 500 },
 };
 
 async function setup(cfg: object = SUSPEND) {
@@ -145,4 +145,59 @@ test('stop で Nearby の suspend を解除する(ペアリングなどが Nearb
   assert.equal(c.net.guest.suspended, false);
   assert.equal(c.guestT.getState().nearby, 'down');
   c.cleanup();
+});
+
+test('画面用: linkSnapshot / onLink / state.linkState に状態名・ラベル・残り時間・履歴・設定が出る', async () => {
+  const c = await setup();
+  const snaps: string[] = [];
+  c.guestT.onLink((s) => snaps.push(s.state.name));
+  assert.equal(c.guestT.getState().linkState.name, 'stopped');
+  await established(c);
+  const sn = c.guestT.linkSnapshot();
+  assert.equal(sn.state.name, 'direct-active');
+  assert.equal(sn.state.label, 'Direct 接続中');
+  assert.equal(sn.state.waiting?.for, 'T_echo');
+  assert.ok(sn.state.waiting!.deadlineAt > Date.now() - 1000);
+  assert.equal(sn.overall, 'connected');
+  assert.equal(sn.path.nearby, 'suspended');
+  assert.ok(sn.history.some((h) => h.to === 'settling') && sn.history.some((h) => h.to === 'direct'));
+  assert.ok(JSON.stringify(sn).indexOf('shared-secret') < 0); // 秘密を含まない
+  assert.equal((sn.timing as any).echoMs, 60);
+  assert.equal(c.guestT.getState().linkState.name, 'direct-active');
+  // 再接続中は「Direct 再接続中 n/3」
+  c.guest.ctl.joinFails = 99;
+  c.guest.ctl.probeOk = false;
+  c.guest.loseWifi();
+  await until(() => c.guestT.linkSnapshot().state.name === 'direct-retrying', 2000, 'retrying');
+  await until(() => /^Direct 再接続中 [123]\/3$/.test(c.guestT.linkSnapshot().state.label), 2000, 'label');
+  assert.ok(snaps.includes('direct-retrying'));
+  c.cleanup();
+});
+
+test('時間設定: 保存した上書きが次の start で効く。範囲外は既定に丸める(unchecked でないとき)', async () => {
+  const f = await pairedFakes();
+  const t = new Tether(f.host.platform, { nearbyWhileDirect: 'suspend', connectTimeoutMs: 100, timing: { hbIntervalMs: 7_000 } });
+  await t.setTimingOverride({ echoMs: 1 as number, settleMs: 9_000 });
+  const logs: string[] = [];
+  t.onLog((l) => logs.push(l));
+  await t.start();
+  const tm = t.getTiming();
+  assert.equal(tm.hbIntervalMs, 7_000);
+  assert.equal(tm.settleMs, 9_000);
+  assert.equal(tm.echoMs, 21_000); // echoMs=1 は範囲外 → hb×3
+  assert.ok(logs.some((l) => l.includes('DH-LINK') && l.includes('timing role=host')));
+  t.stop();
+  await t.setTimingOverride(null);
+});
+
+test('親機が正: 親機の閾値を子機が採用する(子機に別の値があっても)', async () => {
+  const f = await pairedFakes();
+  const base = { link: { baseMs: 5, maxMs: 20, pingTimeoutMs: 400 }, connectTimeoutMs: 100, probeIntervalMs: 1, nearbyWhileDirect: 'suspend' as const, timingUnchecked: true };
+  const hostT = new Tether(f.host.platform, { ...base, timing: { hbIntervalMs: 20, echoMs: 60, directMs: 200, nearbyMs: 260, settleMs: 30, tickMs: 10 } });
+  const guestT = new Tether(f.guest.platform, { ...base, timing: { hbIntervalMs: 30, echoMs: 90, directMs: 300, nearbyMs: 390, settleMs: 40, tickMs: 10 } });
+  await hostT.start(); await guestT.start();
+  await until(() => guestT.getTiming().echoMs === 60, 3000, 'adopt');
+  assert.equal(guestT.getTiming().nearbyMs, 260);
+  assert.equal(guestT.getTiming().tickMs, 10); // 端末ごとの分は自分の値
+  hostT.stop(); guestT.stop();
 });

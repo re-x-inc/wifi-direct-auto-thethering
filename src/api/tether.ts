@@ -2,8 +2,11 @@ import { createLink } from '../link/session';
 import { directCreds, removeDirectCreds } from '../pairing/directCreds';
 import type { LinkSupervisor } from '../link/supervisor';
 import { DataPath, deriveOverall, initialDataPath, NearbyPhase, Overall } from '../link/dataPath';
-import { DirectRetry, GuardAction, GuardEvent, guardTimingFor, nearbyShouldBeOff, RETRY_DEFAULTS } from '../link/directGuard';
-import { LinkGovernor } from '../link/linkGovernor';
+import type { DirectRetry } from '../link/directGuard';
+import { GuardAction, GuardEvent, nearbyShouldBeOff } from '../link/directGuard';
+import { LinkStateInfo } from '../link/stateLabels';
+import { LinkTimingConfig, pickShared, resolveTiming, toGuardTiming, toRetry } from '../link/timingConfig';
+import { LinkContext, LinkGovernor, LinkSnapshot } from '../link/linkGovernor';
 import { NearbyControl } from '../link/transport';
 import type { NearbyApi } from '../link/nearbyTransport';
 import { Confirm, Found, PairingResult, PairingSession } from '../pairing/pairing';
@@ -47,7 +50,9 @@ type Wire =
   | { kind: 'tether.hello'; v: number; rev: string }
   | { kind: 'tether.caps-req'; v: number }
   | { kind: 'tether.caps'; v: number; rev: string; caps: Capabilities }
-  | { kind: 'tether.plan'; v: number; plan: LinkPlan };
+  | { kind: 'tether.plan'; v: number; plan: LinkPlan }
+  // 親機が正の時間設定（閾値の対応関係が崩れないよう、親機から子機へ配る）
+  | { kind: 'tether.timing'; v: 1; timing: Record<string, unknown> };
 
 interface Socks {
   port: number;
@@ -109,6 +114,10 @@ export class Tether {
   private hotspot: HotspotPort;
   /** 制御メッセージの通り道(いまは Nearby。Direct 上のバスは別 PR で差す。src/link/transport.ts) */
   private ctl: NearbyControl | null = null;
+  /** 有効な時間設定（cfg.timing < 保存した上書き < 親機から配られた分）。start のたびに決め直す */
+  private timing: LinkTimingConfig = resolveTiming();
+  private resumedBecause: string | null = null;
+  private since = 0;
   private nearbySuspended = false;
   /** suspend / resume の競合を避ける番号(進行中の suspend は、番号が変わったら取り消す) */
   private suspendSeq = 0;
@@ -125,9 +134,11 @@ export class Tether {
 
   constructor(private p: TetherPlatform, private cfg: TetherConfig = {}) {
     this.gov = new LinkGovernor({
-      timing: guardTimingFor('guest', 5_000), now: () => p.now(), strict: cfg.strictLinkGuard,
+      timing: toGuardTiming(resolveTiming(), 'guest'), now: () => p.now(), strict: cfg.strictLinkGuard,
       log: (l) => this.gnote(l), onAction: (a) => this.runAction(a),
+      context: () => this.linkContext(),
     });
+    this.since = p.now();
     this.nearby = this.gov.wrapNearby(p.nearby);
     this.hotspot = this.gov.wrapHotspot(p.hotspot);
     this.store = new PairStore(p.kv);
@@ -137,12 +148,13 @@ export class Tether {
     try { this.nearby.resume?.(); } catch {}
     this.state = {
       started: false, role: null, autoRole: this.detectRole(), peer: null,
-      link: 'stopped', attempt: 0, nearby: 'down', data: initialDataPath(), overall: 'disconnected',
+      link: 'stopped', attempt: 0, nearby: 'down', data: initialDataPath(), overall: 'disconnected', linkState: {} as LinkStateInfo,
       share: 'off', shareMethod: null, peerReach: null,
       wifi: 'off', joinPrompt: false, joinFailure: null, vpn: 'off', plan: null, pending: 0, error: null,
     };
     // 子機: 前回の VPN が残っていたら、全通信を飲み込んだままにしないよう止める
     this.safeStopVpn();
+    this.deriveState();
   }
 
   // ---------- 状態 ----------
@@ -456,7 +468,10 @@ export class Tether {
       const granted = await this.p.requestPermissions();
       if (this.pairingBusy) return; // 待っている間にペアリングが始まった
       if (!granted) this.set({ error: '権限が許可されていません(Nearby・近くのデバイス・通知)' });
+      await this.resolveTiming(role);
+      if (this.pairingBusy) return;
       const gen = ++this.gen;
+      this.since = this.p.now();
       this.peerId = pair.peerId;
       this.autoShare = opts.autoShare ?? true;
       this.vpnHold = false;
@@ -467,7 +482,7 @@ export class Tether {
         this.nearby,
         { role, selfId: self.id, pair: { peerId: pair.peerId, secret: pair.secret }, connectTimeoutMs: this.cfg.connectTimeoutMs ?? 30_000 },
         (body) => ctl.deliver(body),
-        { sleep: this.p.sleep, now: this.p.now, ...this.cfg.link },
+        { baseMs: this.timing.nearbyRetryBaseMs, maxMs: this.timing.nearbyRetryMaxMs, sleep: this.p.sleep, now: this.p.now, ...this.cfg.link },
       );
       sup.onState = (s, n) => {
         if (gen !== this.gen) return;
@@ -550,6 +565,7 @@ export class Tether {
     this.peerSuspends = false;
     this.rejoining = false;
     this.retry = null;
+    this.resumedBecause = null;
     this.gateway = null;
     this.safeStopVpn();
     try { h.leaveWifi(); } catch {}
@@ -945,6 +961,7 @@ export class Tether {
     // 親機: つながり直したら、判断と共有中の接続情報を再送する(Direct は作り直さず、子機は同じ SSID を再利用する)
     if (role === 'host') {
       this.sendPlan();
+      if (this.nearbyMode === 'suspend') this.ctl?.send({ kind: 'tether.timing', v: 1, timing: { ...pickShared(this.timing) } } satisfies Wire, { key: 'timing', ttlMs: WIFI_TTL_MS });
       if (this.shareMsg) {
         // suspend 方式: Direct のグループが消えていたら、接続情報を再送 → Nearby を閉じる → グループ再作成の順で作り直す。
         // グループが生きていれば維持して、接続情報を再送するだけ(子機は同じ SSID に入り直す)
@@ -987,6 +1004,9 @@ export class Tether {
         break;
       case 'tether.caps':
         if (role === 'host') void this.onCaps(gen, peerId, body.v, body.rev, body.caps).catch((e) => this.log('caps 処理で例外: ' + (e?.message ?? e)));
+        break;
+      case 'tether.timing':
+        if (role === 'guest') this.adoptHostTiming(gen, body.timing);
         break;
       case 'tether.plan':
         if (role === 'guest') void this.onPlan(gen, body.plan).catch((e) => this.log('plan 処理で例外: ' + (e?.message ?? e)));
@@ -1044,7 +1064,7 @@ export class Tether {
     this.log(`接続情報を受信 ssid=${m.ssid} → 参加(端末の承認ダイアログが出たら許可)`);
     try {
       // 固定 SSID なら、承認ダイアログで「常に許可」を選んだ後は OS が覚える
-      const { gateway } = await h.joinWifi(m.ssid, m.pass, timeoutMs);
+      const { gateway } = await h.joinWifi(m.ssid, m.pass, timeoutMs ?? this.timing.joinTimeoutMs);
       if (gen !== this.gen) return;
       // join ok は OS が local-only ネットワークを渡しただけ。実際に親機まで届くかは、このあとの到達確認・VPN のログで見る
       this.log(`参加 ok gw=${gateway} → 到達確認(link=${this.state.link})`);
@@ -1118,12 +1138,70 @@ export class Tether {
     }
   }
 
+  // ---------- 時間の設定・状態の公開 ----------
+
+  /** いま有効な時間設定（既定 < cfg.timing < 保存した上書き < 親機から配られた分）。start() のたびに決まる */
+  getTiming(): LinkTimingConfig {
+    return { ...this.timing, retryBackoffMs: [...this.timing.retryBackoffMs] };
+  }
+
+  /**
+   * 開発・検証用: 時間設定を保存して、次の start() から効かせる（再ビルド不要）。null で消す。保存先は kv（本番は SecureStore）。
+   * 範囲外の値は start() で既定に丸められる。子機は親機の設定（閾値・hb・再接続）を受け取って上書きするので、通常は親機にだけ入れる。
+   */
+  async setTimingOverride(patch: Partial<LinkTimingConfig> | null): Promise<void> {
+    if (patch === null) { if (this.p.kv.remove) await this.p.kv.remove(TIMING_KEY); else await this.p.kv.set(TIMING_KEY, ''); }
+    else await this.p.kv.set(TIMING_KEY, JSON.stringify(patch));
+  }
+
+  private async resolveTiming(role: TetherRole): Promise<void> {
+    let saved: Partial<LinkTimingConfig> = {};
+    try {
+      const raw = await this.p.kv.get(TIMING_KEY);
+      if (raw) saved = JSON.parse(raw);
+    } catch { saved = {}; }
+    const t = resolveTiming({ ...(this.cfg.timing ?? {}), ...saved }, { unchecked: this.cfg.timingUnchecked, log: (l) => this.gnote('timing: ' + l) });
+    this.timing = t;
+    this.gnote(`timing role=${role} source=${Object.keys(saved).length ? 'config+保存した上書き' : 'config'} ${JSON.stringify(t)}`);
+  }
+
+  /** 画面用: いまの状態(内部名・日本語ラベル・経過・次の遷移までの残り・試行回数)、遷移履歴、総合状態、データ経路、有効な設定値 */
+  linkSnapshot(): LinkSnapshot {
+    return this.gov.snapshot();
+  }
+
+  /** 画面用: linkSnapshot が変わるたびに呼ばれる。戻り値で購読解除 */
+  onLink(cb: (s: LinkSnapshot) => void): () => void {
+    return this.gov.subscribe(cb);
+  }
+
+  private linkContext(): LinkContext {
+    const s = this.state;
+    return {
+      role: s.role, started: s.started, nearbyMode: this.nearbyMode,
+      creating: s.role === 'host' && s.share === 'starting', joining: s.role === 'guest' && s.wifi === 'joining',
+      directUp: s.role === 'host' ? s.share === 'on' && this.data.group !== false : s.wifi === 'joined',
+      nearbyUp: s.link === 'connected', resumedBecause: this.resumedBecause, attempt: this.retry ? { n: this.retry.attempt, max: this.retry.max } : null,
+      overall: s.overall, nearby: s.nearby, data: this.data, since: this.since, timing: { ...this.timing, guard: this.gov.timing },
+    };
+  }
+
+  /** 子機: 親機が正の時間設定を受け取る（閾値の対応関係 親機の戻り ≤ 子機の探索開始 が崩れないよう、共有分は親機の値に揃える） */
+  private adoptHostTiming(gen: number, raw: Record<string, unknown>): void {
+    if (gen !== this.gen || this.state.role !== 'guest' || this.nearbyMode !== 'suspend') return;
+    const shared = resolveTiming(raw as Partial<LinkTimingConfig>, { unchecked: this.cfg.timingUnchecked, log: (l) => this.gnote('timing(親機から): ' + l) });
+    this.timing = { ...this.timing, ...pickShared(shared) };
+    this.gov.setTiming(toGuardTiming(this.timing, 'guest'));
+    this.gnote(`timing 親機の設定を採用 ${JSON.stringify(pickShared(this.timing))}`);
+    this.set({});
+  }
+
   // ---------- Direct が生きている間は Nearby を止める(nearbyWhileDirect: 'suspend') ----------
   //
   // 判断の理由と状態遷移は src/link/directGuard.ts(純関数)。ここは信号を集めて、返ってきた動作(suspend / resume)を実行する。
 
   private hbMs(): number {
-    return this.cfg.directGuard?.hbIntervalMs ?? 5_000;
+    return this.timing.hbIntervalMs;
   }
 
   /** 判定の理由を診断ログ(DH-TETHER)と logcat(DH-NEARBY)の両方に残す。ssid・pass・secret は含めない */
@@ -1137,10 +1215,7 @@ export class Tether {
     const can = typeof this.nearby.suspend === 'function';
     this.nearbyMode = want && can ? 'suspend' : 'keep';
     if (want && !can) this.log('nearbyWhileDirect=suspend ですが、この Nearby 部品は suspend 未対応のため keep で動きます');
-    const g = this.cfg.directGuard ?? {};
-    const { hbIntervalMs: _h, tickMs: _t, ...over } = g;
-    const rc = this.retryCfg();
-    this.gov.setTiming(guardTimingFor(role, this.hbMs(), over, { attempts: rc.attempts, attemptMs: rc.attemptMs }));
+    this.gov.setTiming(toGuardTiming(this.timing, role));
     this.gov.setStrict(this.cfg.strictLinkGuard);
     this.gov.reset();
     this.data = initialDataPath();
@@ -1162,6 +1237,7 @@ export class Tether {
     const before = this.gov.phase;
     this.gov.dispatch(ev);
     if (this.retry && this.gov.phase !== 'retrying') this.retry = null;
+    if (this.gov.phase === 'direct') this.resumedBecause = null;
     if (before !== this.gov.phase) this.set({});
   }
 
@@ -1173,7 +1249,7 @@ export class Tether {
   }
 
   private async guardLoop(gen: number): Promise<void> {
-    const tickMs = this.cfg.directGuard?.tickMs ?? 1_000;
+    const tickMs = this.timing.tickMs;
     let last = this.p.now();
     while (gen === this.gen) {
       await this.p.sleep(tickMs);
@@ -1270,16 +1346,25 @@ export class Tether {
   }
 
   private resumeNearby(gen: number, reason: string): void {
-    this.suspendSeq++;
+    const seq = ++this.suspendSeq;
     this.retry = null;
+    this.resumedBecause = reason;
     const was = this.nearbySuspended;
     this.nearbySuspended = false;
     this.gov.markNearbyStopped(false);
     this.nearbyDirectActive(false);
     this.data = { ...this.data, echoAt: null };
     this.gnote(`Nearby を再開(理由=${reason}, 停止中だった=${was}, group=${this.data.group}) → 広告・探索へ`);
-    try { this.nearby.resume?.(); } catch {}
-    this.link?.resume();
+    const go = () => {
+      if (gen !== this.gen || seq !== this.suspendSeq || this.nearbySuspended) return;
+      try { this.nearby.resume?.(); } catch {}
+      this.link?.resume();
+    };
+    const delay = this.timing.nearbyResumeDelayMs;
+    if (delay > 0) {
+      this.gnote(`Nearby 再開の前に ${delay}ms 待つ(timing.nearbyResumeDelayMs)`);
+      void this.p.sleep(delay).then(go);
+    } else go();
     if (gen === this.gen) this.set({});
   }
 
@@ -1298,6 +1383,11 @@ export class Tether {
     const seq = this.suspendSeq + 1;
     await this.suspendNearby(gen); // ack を待って閉じる(② stopAllEndpoints の完了待ちを含む)
     if (gen !== this.gen || this.suspendSeq !== seq) return;
+    if (this.timing.groupRebuildDelayMs > 0) {
+      this.gnote(`Direct 作り直し: グループ作成の前に ${this.timing.groupRebuildDelayMs}ms 待つ(timing.groupRebuildDelayMs)`);
+      await this.p.sleep(this.timing.groupRebuildDelayMs);
+      if (gen !== this.gen || this.suspendSeq !== seq) return;
+    }
     const pair = (await this.pairs()).find((x) => x.peerId === this.peerId);
     if (!pair || gen !== this.gen) return;
     this.gnote('Direct 作り直し: ③ 固定グループを作り直す');
@@ -1318,7 +1408,7 @@ export class Tether {
   }
 
   private retryCfg(): DirectRetry {
-    return { ...RETRY_DEFAULTS, ...(this.cfg.directRetry ?? {}) };
+    return toRetry(this.timing);
   }
 
   private inRetrying(gen: number): boolean {
@@ -1431,6 +1521,7 @@ export class Tether {
     this.state = { ...this.state, ...patch };
     this.deriveState();
     this.notify();
+    this.gov.notify();
     if (this.state.overall !== prev) {
       this.gnote(`overall ${prev} → ${this.state.overall} (nearby=${this.state.nearby})`);
       for (const cb of [...this.overallSubs]) {
@@ -1448,6 +1539,7 @@ export class Tether {
       heartbeatMode: this.nearbyMode === 'suspend', retrying: this.retry !== null, now: this.p.now(), echoMs: this.gov.timing.echoMs, directMs: this.gov.timing.directMs,
     });
     this.state = { ...s, nearby, overall, data: { ...this.data } };
+    this.state.linkState = this.gov.snapshot().state;
   }
 
   private notify(): void {
@@ -1468,6 +1560,7 @@ const sameWifi = (a: WifiMsg, b: WifiMsg) =>
   a.ssid === b.ssid && a.pass === b.pass && a.port === b.port && a.socks.user === b.socks.user && a.socks.pass === b.socks.pass && a.socks.port === b.socks.port;
 
 const DEVICE_ROLE_KEY = 'tether.deviceRole';
+const TIMING_KEY = 'tether.timing.v1';
 
 const safeFreq = (h: { wifiFrequency(): number }): number => {
   try { return h.wifiFrequency(); } catch { return 0; }

@@ -1,6 +1,7 @@
 import type { NearbyApi } from '../link/nearbyTransport';
 import type { DataPath, NearbyPhase, Overall } from '../link/dataPath';
-import type { DirectRetry, GuardTiming } from '../link/directGuard';
+import type { LinkTimingConfig } from '../link/timingConfig';
+import type { LinkStateInfo } from '../link/stateLabels';
 import type { Options as LinkTiming, SendOptions } from '../link/supervisor';
 import type { KeyValue } from '../pairing/types';
 import type { CapabilityPort } from './capability';
@@ -60,6 +61,11 @@ export interface TetherState {
    * connected = データが流れる / degraded = 経路の一部はあるが確認できていない / disconnected = データ経路がない
    */
   overall: Overall;
+  /**
+   * 画面用の「いまの状態」（内部名・日本語ラベル・経過秒・次の遷移までの残り・再接続 n/3）。履歴など全体は tether.linkSnapshot() / onLink()。
+   * 後方互換のため追加のみ。
+   */
+  linkState: LinkStateInfo;
   /** 切断中などで、まだ相手に届いていない送信メッセージの数 */
   pending: number;
   /** 直近の失敗(画面に出す用)。成功したら null に戻る */
@@ -178,10 +184,14 @@ export interface TetherConfig {
   /** true: Nearby/Direct の不変条件(src/link/linkGovernor.ts)に違反したら例外を投げる(テスト用)。既定 false=拒否して DH-LINK にログ */
   strictLinkGuard?: boolean;
   nearbyWhileDirect?: 'keep' | 'suspend';
-  /** suspend 方式の時間(テスト用に短くできる)。hbIntervalMs = 子機のハートビート間隔(既定 5000。T_echo=×3、T_direct=T_echo+再接続3回×45s=150s、T_nearby=T_direct+T_echo=165s)、tickMs = 判定の周期(既定 1000) */
-  /** Direct が切れたと分かったとき、Nearby に戻る前に保存済みの接続情報で Direct を再接続する回数・間隔(既定 3 回・1s/2s/4s・1回の参加待ち40s) */
-  directRetry?: Partial<DirectRetry>;
-  directGuard?: Partial<GuardTiming> & { hbIntervalMs?: number; tickMs?: number };
+  /**
+   * 時間の設定（開始待ち・タイムアウト・閾値。すべて任意）。範囲外は既定に丸めてログ、T_echo < T_direct < T_nearby は補正してログ。
+   * 型・既定・範囲は src/link/timingConfig.ts。start() のたびに「既定 < ここ < setTimingOverride で保存した値」で決まり、
+   * suspend 方式の子機は共有分（閾値・hb・再接続）を親機の値に揃える。
+   */
+  timing?: Partial<LinkTimingConfig>;
+  /** true: timing の範囲チェックを省く（テスト用に短い時間を使う） */
+  timingUnchecked?: boolean;
   /** 方式判断の方針(台数の上限・既存接続の扱いなど) */
   planPolicy?: Partial<PlanPolicy>;
 }

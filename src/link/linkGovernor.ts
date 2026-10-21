@@ -1,6 +1,44 @@
 import type { NearbyApi } from './nearbyTransport';
 import { GuardAction, GuardEvent, GuardPhase, GuardState, GuardTiming, initialGuard, nearbyShouldBeOff, stepGuard } from './directGuard';
 import type { HotspotPort } from '../api/types';
+import type { DataPath, NearbyPhase, Overall } from './dataPath';
+import { labelOf, LinkStateInfo, LinkStateName, Transition, WaitingFor } from './stateLabels';
+
+/** 画面表示用に Tether が渡す、状態機械の外側の情報 */
+export interface LinkContext {
+  role: 'host' | 'guest' | null;
+  started: boolean;
+  nearbyMode: 'keep' | 'suspend';
+  /** 親機の share / 子機の wifi（'starting'|'joining' などの作成中判定用） */
+  creating: boolean;
+  joining: boolean;
+  /** keep 方式で Direct が張れている */
+  directUp: boolean;
+  nearbyUp: boolean;
+  /** Nearby を再開した理由（再開してまだ Direct に戻っていない間だけ） */
+  resumedBecause: string | null;
+  attempt: { n: number; max: number } | null;
+  overall: Overall;
+  nearby: NearbyPhase;
+  data: DataPath;
+  /** 起動した時刻（stopped/keep の enteredAt 用） */
+  since: number;
+  /** 有効な設定値（resolveTiming の結果と GuardTiming）。秘密を含まない */
+  timing: unknown;
+}
+
+export interface LinkSnapshot {
+  state: LinkStateInfo;
+  overall: Overall;
+  /** データ経路の内訳 */
+  path: { nearby: NearbyPhase; group: boolean | null; echoAt: number | null; reach: DataPath['reach']; heartbeat: DataPath['heartbeat'] };
+  /** 直近の遷移（古い順、最大 HISTORY_MAX 件）。秘密・SSID・パスは含まない */
+  history: Transition[];
+  timing: unknown;
+  at: number;
+}
+
+const HISTORY_MAX = 50;
 
 /**
  * Nearby と Wi-Fi Direct の使い分けの責任者。状態機械(directGuard.ts の遷移表。docs/LINK_STATE.md の図と一対一)を持ち、
@@ -30,6 +68,8 @@ export interface GovernorOptions {
   strict?: boolean;
   /** 状態遷移で出た動作(suspend / resume / retry)を実行する */
   onAction: (a: Exclude<GuardAction, { type: 'note' }>) => void;
+  /** 画面表示用の文脈（snapshot で使う）。省略時は最小限 */
+  context?: () => LinkContext;
 }
 
 export class LinkGovernor {
@@ -39,6 +79,8 @@ export class LinkGovernor {
   /** rebuild 手順中(接続情報を送った → Nearby を閉じる → グループ作成) */
   private rebuilding = false;
   readonly violations: string[] = [];
+  private hist: Transition[] = [];
+  private subs = new Set<(s: LinkSnapshot) => void>();
 
   constructor(private o: GovernorOptions) {
     this.s = initialGuard(o.now());
@@ -54,7 +96,11 @@ export class LinkGovernor {
     const prev = this.s;
     const [next, acts] = stepGuard(prev, ev, this.o.now(), this.o.timing);
     this.s = next;
-    if (next.phase !== prev.phase) this.o.log(`transition ${prev.phase} → ${next.phase} on ${ev.t}${'reason' in ev ? `(${ev.reason})` : ''}`);
+    if (next.phase !== prev.phase) {
+      this.o.log(`transition ${prev.phase} → ${next.phase} on ${ev.t}${'reason' in ev ? `(${ev.reason})` : ''}`);
+      const act = acts.find((a) => a.type === 'retry' || a.type === 'resume') as { reason: string } | undefined;
+      this.record({ at: this.o.now(), from: prev.phase, to: next.phase, event: ev.t, reason: ('reason' in ev ? ev.reason : act?.reason) ?? null });
+    }
     if (ev.t === 'rebuild-start') this.rebuilding = true;
     if (next.phase === 'direct') this.rebuilding = false;
     for (const a of acts) {
@@ -89,9 +135,67 @@ export class LinkGovernor {
 
   /** リセット(停止・ペアリングなど)。Nearby は誰でも使える状態に戻る */
   reset(): void {
+    if (this.s.phase !== 'nearby') this.record({ at: this.o.now(), from: this.s.phase, to: 'nearby', event: 'reset', reason: null });
     this.s = initialGuard(this.o.now());
     this.nearbyStopped = false;
     this.rebuilding = false;
+  }
+
+  private record(t: Transition): void {
+    this.hist.push(t);
+    if (this.hist.length > HISTORY_MAX) this.hist.shift();
+    this.notify();
+  }
+
+  /** 購読（画面用）。遷移のたびと、Tether が notify() したときに呼ばれる。戻り値で解除 */
+  subscribe(cb: (s: LinkSnapshot) => void): () => void {
+    this.subs.add(cb);
+    return () => this.subs.delete(cb);
+  }
+
+  notify(): void {
+    if (this.subs.size === 0) return;
+    const snap = this.snapshot();
+    for (const cb of [...this.subs]) {
+      try { cb(snap); } catch {}
+    }
+  }
+
+  /** いまの状態・次の遷移までの残り・試行回数・遷移履歴・総合状態とデータ経路・有効な設定値 */
+  snapshot(): LinkSnapshot {
+    const now = this.o.now();
+    const c = this.o.context?.() ?? null;
+    const tm = this.o.timing;
+    const s = this.s;
+    const suspend = !c || c.nearbyMode === 'suspend';
+    let name: LinkStateName;
+    let waiting: { for: WaitingFor; deadlineAt: number } | null = null;
+    const attempt = c?.attempt ?? null;
+    let enteredAt = s.at;
+    if (c && !c.started) { name = 'stopped'; enteredAt = c.since; }
+    else if (!suspend) {
+      enteredAt = c!.since;
+      name = c!.creating ? 'direct-creating' : c!.joining ? 'direct-joining' : c!.directUp ? 'keep-mode' : c!.nearbyUp ? 'nearby-connected' : c!.role === 'host' ? 'nearby-waiting' : 'nearby-searching';
+    } else {
+      switch (s.phase) {
+        case 'settling': name = 'direct-settling'; waiting = { for: 'settle', deadlineAt: s.at + tm.settleMs }; break;
+        case 'direct': name = 'direct-active'; waiting = { for: 'T_echo', deadlineAt: s.aliveAt + tm.echoMs }; break;
+        case 'retrying': name = 'direct-retrying'; waiting = { for: tm.resumeAtMs === tm.directMs ? 'T_direct' : 'T_nearby', deadlineAt: s.base + tm.resumeAtMs }; break;
+        case 'rejoining': name = 'direct-rebuilding'; waiting = { for: 'rejoin', deadlineAt: s.at + tm.rejoinMs }; break;
+        default:
+          name = c?.creating ? 'direct-creating' : c?.joining ? 'direct-joining' : c?.resumedBecause && !c.nearbyUp ? 'nearby-resumed' : c?.nearbyUp ? 'nearby-connected' : c?.role === 'host' ? 'nearby-waiting' : 'nearby-searching';
+      }
+    }
+    const state: LinkStateInfo = {
+      name, label: labelOf(name, attempt), phase: suspend ? s.phase : null, enteredAt, elapsedSec: Math.max(0, Math.round((now - enteredAt) / 1000)),
+      waiting: waiting ? { ...waiting, remainingMs: Math.max(0, waiting.deadlineAt - now) } : null, attempt,
+    };
+    const d = c?.data;
+    return {
+      state, overall: c?.overall ?? 'disconnected',
+      path: { nearby: c?.nearby ?? 'down', group: d?.group ?? null, echoAt: d?.echoAt ?? null, reach: d?.reach ?? null, heartbeat: d?.heartbeat ?? null },
+      history: [...this.hist], timing: c?.timing ?? tm, at: now,
+    };
   }
 
   private violate(rule: string, msg: string): boolean {
