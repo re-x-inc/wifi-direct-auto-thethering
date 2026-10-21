@@ -71,3 +71,7 @@ comparisonMarkdown([reportA, reportB], /* onlyDiffs */ true); // 機種比較の
 - `TetherState.data`: `{ group, echoAt, heartbeat, okAt, reach }`(親機: グループの有無・子機のエコー最終受付 / 子機: Wi-Fi 参加・ハートビート・到達確認)。
 - 既存の購読者への影響なし(フィールド追加のみ)。`link` は Nearby の状態のまま(suspend 中は `'waiting'`)なので、接続表示には `overall` を使う。
 - `send()` は Direct 稼働中は溜まる(`pending`)。Nearby 再開後に届く。Direct 上の制御バスは別 PR(`src/link/transport.ts` の `ControlTransport` に差す)。
+
+## Direct 稼働中のメッセージ(バス)
+
+`tether.send()` / `onMessage()` は、Direct 稼働中(`nearbyWhileDirect: 'suspend'` で Nearby を止めている間)は Direct 上のバスで、それ以外は Nearby で運ばれる。呼び出し側の API は変わらない。切断中は溜めて再接続後に送信順で再送(ttl・key も同じ意味)。受け手には at-least-once のうち重複を除いて 1 回だけ渡る。詳細は [GATEWAY_BUS.md](GATEWAY_BUS.md) §11 / [LINK_STATE.md](LINK_STATE.md)。

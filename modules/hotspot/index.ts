@@ -11,6 +11,10 @@ type Events = {
   onEchoAccept(e: Record<string, never>): void;
   /** 子機: ネイティブのハートビートの結果が出た(成功・失敗のたび。JS が起きている間だけ届く) */
   onHeartbeat(e: HeartbeatStatus): void;
+  /** 制御バス(Direct 上の ZeroMQ)の認証完了/切断 */
+  onBusState(e: { up: boolean; reason: string }): void;
+  /** 制御バスのメッセージ(認証済みのものだけ) */
+  onBusMessage(e: { payload: string }): void;
   /** 子機の Wi-Fi 参加。phase 'show' = 端末の許可画面が出る(「接続」を押してもらう)。ok/declined/timeout/cancelled = 終わり */
   onJoinPrompt(e: { ssid: string; phase: 'show' | 'ok' | 'declined' | 'timeout' | 'cancelled'; timeoutMs?: number }): void;
 };
@@ -76,6 +80,12 @@ declare class HotspotModule extends NativeModule<Events> {
   heartbeatStart(host: string, port: number, intervalMs: number, timeoutMs: number, screenOffIntervalMs: number, wakeLock: boolean): void;
   heartbeatStop(): void;
   heartbeatStatus(): HeartbeatStatus;
+  /** 制御バスを始める(host=親機: Direct のインターフェースで待ち受け / 子機: addr の親機へつなぎ続ける)。戻り値は bind 先 */
+  busStart(host: boolean, selfId: string, peerId: string, keyHex: string, addr: string | null, port: number, pingMs: number, timeoutMs: number): string;
+  busStop(): void;
+  busSend(payload: string): boolean;
+  /** JS が止まっていてもネイティブが更新し続ける生存信号 */
+  busStatus(): { running: boolean; up: boolean; lastRxAt: number; connects: number; lastError: string | null };
   probe(host: string, port: number): Promise<{ ok: boolean; rttMs?: number; error?: string }>;
 }
 

@@ -253,3 +253,20 @@ Direct 稼働中に送れるのは echo 上の heartbeat だけ。それ以外�
 `path`(nearby up|down|suspended / group / echoAt / reach / heartbeat)、`history`(直近 50 件の遷移: at / from / to / event / reason。SSID・パス・共有コードは含まない)、`timing`(有効な設定値と状態機械の時間)。
 
 画面の想定: ホームの接続行 = `state.label` + `overall`(色)/ 待つ画面 = `label` と `waiting.deadlineAt` のカウントダウン、再接続中は `attempt` / 診断画面 = `history` と `path`・`timing` の一覧。
+
+
+## 制御メッセージの運び先(Nearby / バス)と生存信号
+
+Direct 稼働中は Nearby を止めるので、`tether.send` などのアプリのメッセージは **Direct 上のバス**(ZeroMQ。`docs/GATEWAY_BUS.md` §11)で運ぶ。`Tether` は `RoutedControl`(`ControlTransport`)だけを見る。
+
+| 状況 | 運び先 | 備考 |
+|---|---|---|
+| Direct 稼働(direct / retrying / rejoining)かつ suspend かつバスが認証済みになったことがある | バス | 切れている間はバスの保留キュー(ttl・key・順序は LinkSupervisor と同じ) |
+| settling / nearby(Nearby が使える) | Nearby | |
+| `tether.wifi`(接続情報) | 常に Nearby | |
+| keep 方式 / 旧版の相手 / バス部品なし | Nearby | 従来どおり |
+
+- **バス断**: Nearby は再開しない(再接続が先)。ネイティブが再接続を続け、認証完了で未確認を seq 順に再送。受け手は (epoch, seq) で重複排除。
+- **Nearby への縮退**: governor が Nearby を再開した(T_direct・再接続の使い切り)、または子機が Wi-Fi 切断でバスを止めたとき、バスの未確認を送信順のまま Nearby の送信へ移す。バスの切断自体は governor に通知しない(生存信号が途絶えることで T_echo → T_direct が進む)。
+- **生存信号**: `lastAliveAt` = Echo(親機=最後の受付、子機=最後の成功)とバス(ネイティブが更新する `lastRxAt`)の新しい方。T_echo / T_direct の判定と governor の `alive` の入力。バス接続中は子機は Echo を省く。Echo は当面残す(旧版互換)。
+- ログ: `[DH-LINK] 制御メッセージの運び先: …`、`[DH-LINK] バス接続/切断(理由)`、`[DH-BUS]`(TS 側)、ネイティブは logcat/診断の `DH-BUS`。

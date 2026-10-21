@@ -62,6 +62,20 @@ export function nativePlatform(): TetherPlatform {
         return () => sub.remove();
       },
     },
+    bus: {
+      start: (o) => Hotspot.busStart(o.host, o.selfId, o.peerId, o.keyHex, o.addr, o.port, o.pingMs, o.timeoutMs),
+      stop: () => Hotspot.busStop(),
+      send: (p) => Hotspot.busSend(p),
+      status: () => Hotspot.busStatus(),
+      onState: (cb) => {
+        const sub = Hotspot.addListener('onBusState', (e) => cb(e));
+        return () => sub.remove();
+      },
+      onMessage: (cb) => {
+        const sub = Hotspot.addListener('onBusMessage', (e) => cb(e.payload));
+        return () => sub.remove();
+      },
+    },
     capability: {
       collect: () => Hotspot.capabilities(),
       probeLohs: () => Hotspot.probeLohs(),
