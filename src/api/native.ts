@@ -31,7 +31,7 @@ export function nativePlatform(): TetherPlatform {
       socksSelfTest: (port, u, p) => Hotspot.socksSelfTest(port, u, p),
       startEcho: (port) => Hotspot.startEcho(port),
       stopEcho: () => Hotspot.stopEcho(),
-      joinWifi: (s, p) => Hotspot.joinWifi(s, p),
+      joinWifi: (s, p, t) => Hotspot.joinWifi(s, p, t ?? null),
       leaveWifi: () => Hotspot.leaveWifi(),
       wifiFrequency: () => Hotspot.wifiFrequency(),
       hasCellular: () => Hotspot.hasCellular(),
@@ -40,6 +40,14 @@ export function nativePlatform(): TetherPlatform {
       probe: (h, port) => Hotspot.probe(h, port),
       onWifiLost: (cb) => {
         const sub = Hotspot.addListener('onWifiLost', () => cb());
+        return () => sub.remove();
+      },
+      onDirectGroup: (cb) => {
+        const sub = Hotspot.addListener('onDirectGroup', (e) => cb(e));
+        return () => sub.remove();
+      },
+      onEchoAccept: (cb) => {
+        const sub = Hotspot.addListener('onEchoAccept', () => cb());
         return () => sub.remove();
       },
       onJoinPrompt: (cb) => {

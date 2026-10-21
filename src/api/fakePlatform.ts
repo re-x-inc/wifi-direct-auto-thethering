@@ -20,6 +20,10 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
   const wifiLost = new Set<() => void>();
   const joinPrompt = new Set<(e: { ssid: string; phase: 'show' | 'ok' | 'declined' | 'timeout' | 'cancelled'; timeoutMs?: number }) => void>();
   const vpnState = { running: false, permitted: true };
+  const groupCbs = new Set<(e: { up: boolean; clients: number; appInitiated?: boolean }) => void>();
+  const echoCbs = new Set<() => void>();
+  /** テストから切り替える: probe(ハートビート/到達確認)の成否、joinWifi の失敗 */
+  const ctl = { probeOk: true, joinFails: 0 };
   const hotspot: HotspotPort = {
     startHotspot: async () => (calls.push('startHotspot'), { ssid: 'AndroidShare_1', passphrase: 'lohspass' }),
     stopHotspot: () => void calls.push('stopHotspot'),
@@ -36,8 +40,11 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     socksSelfTest: async () => ({ ok: true, line: 'ok' }),
     startEcho: () => void calls.push('startEcho'),
     stopEcho: () => void calls.push('stopEcho'),
+    onDirectGroup: (cb) => (groupCbs.add(cb), () => groupCbs.delete(cb)),
+    onEchoAccept: (cb) => (echoCbs.add(cb), () => echoCbs.delete(cb)),
     joinWifi: async (ssid) => {
       calls.push('join:' + ssid);
+      if (ctl.joinFails > 0) { ctl.joinFails--; throw new Error('not-found'); }
       if (o.joinError) throw new Error(o.joinError);
       return { gateway: '192.168.49.1' };
     },
@@ -46,7 +53,7 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     hasCellular: () => o.cellular ?? false,
     bindToJoined: () => true,
     unbindProcess: () => void calls.push('unbind'),
-    probe: async () => ({ ok: true, rttMs: 3 }),
+    probe: async () => (ctl.probeOk ? { ok: true, rttMs: 3 } : { ok: false, error: 'ECONNREFUSED' }),
     onJoinPrompt: (cb) => (joinPrompt.add(cb), () => joinPrompt.delete(cb)),
     onWifiLost: (cb) => (wifiLost.add(cb), () => wifiLost.delete(cb)),
   };
@@ -98,7 +105,9 @@ export function fakePlatform(nearby: NearbyApi, o: { cellular?: boolean; directF
     sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))),
     now: () => Date.now(),
   };
-  return { platform, calls, files, vpnState, emitJoinPrompt: (e: Parameters<typeof joinPrompt.add>[0] extends (x: infer E) => void ? E : never) => joinPrompt.forEach((cb) => cb(e)), loseWifi: () => wifiLost.forEach((cb) => cb()) };
+  return { platform, calls, files, vpnState, ctl,
+    emitGroup: (e: { up: boolean; clients: number; appInitiated?: boolean }) => groupCbs.forEach((cb) => cb(e)),
+    emitEcho: () => echoCbs.forEach((cb) => cb()), emitJoinPrompt: (e: Parameters<typeof joinPrompt.add>[0] extends (x: infer E) => void ? E : never) => joinPrompt.forEach((cb) => cb(e)), loseWifi: () => wifiLost.forEach((cb) => cb()) };
 }
 
 /** 両端末に同じ共有コードのペアを入れた、親機・子機の偽プラットフォーム(fakeNearbyPair の端末名に合わせる) */

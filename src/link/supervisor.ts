@@ -72,7 +72,12 @@ export class LinkSupervisor {
   private running = false;
   private endSession: (() => void) | null = null;
   /** 画面表示用。connecting=接続試行中 / connected=認証済み / waiting=再試行待ち / stopped */
-  onState: (state: 'connecting' | 'connected' | 'waiting' | 'stopped', attempt: number) => void = () => {};
+  onState: (state: 'connecting' | 'connected' | 'waiting' | 'paused' | 'stopped', attempt: number) => void = () => {};
+  /** pause() 中。true の間は Nearby に何も要求しない(接続も探索もしない) */
+  private paused = false;
+  private resumeWaiters: (() => void)[] = [];
+  private abortConnect: (() => void) | null = null;
+  private connecting: Transport | null = null;
   private o: Options;
 
   constructor(
@@ -111,21 +116,33 @@ export class LinkSupervisor {
     this.running = true;
     let attempt = 0;
     while (this.running) {
+      if (this.paused) {
+        this.onState('paused', 0);
+        await new Promise<void>((r) => this.resumeWaiters.push(r));
+        attempt = 0;
+        continue;
+      }
       const t = this.makeTransport();
       this.onState('connecting', attempt);
+      this.connecting = t;
       try {
-        await t.connect();
+        await Promise.race([t.connect(), new Promise<never>((_, rej) => { this.abortConnect = () => rej(new Error('paused')); })]);
       } catch {
+        this.abortConnect = null;
+        this.connecting = null;
+        if (this.paused || !this.running) { t.close(); continue; }
         this.onState('waiting', attempt);
         await this.o.sleep(backoffMs(attempt++, this.o));
         continue;
       }
+      this.abortConnect = null;
+      this.connecting = null;
       attempt = 0;
       this.onState('connected', 0);
       const upAt = this.o.now();
       await this.session(t);
       this.transport = null;
-      if (this.running) {
+      if (this.running && !this.paused) {
         this.onState('waiting', 0);
         // しばらくつながっていた後の切断は、待たずにすぐ探索をやり直す。つながってすぐ切れる場合だけ間をおく
         if (this.o.now() - upAt < this.o.flapMs) await this.o.sleep(backoffMs(0, this.o));
@@ -136,8 +153,43 @@ export class LinkSupervisor {
 
   stop(): void {
     this.running = false;
+    this.paused = false;
     this.endSession?.();
     this.transport?.close();
+    this.abortConnect?.();
+    this.wake();
+  }
+
+  get isPaused(): boolean {
+    return this.paused;
+  }
+
+  private wake(): void {
+    const w = this.resumeWaiters;
+    this.resumeWaiters = [];
+    w.forEach((r) => r());
+  }
+
+  /**
+   * Nearby を閉じて、resume() まで再接続しない(Direct が生きている間、Nearby の接続・探索・広告を出さないため)。
+   * 接続中なら、未確認の送信が ack されるまで最大 drainMs 待ってから閉じる(接続情報・到達確認を取りこぼさない)。
+   * 溜めたメッセージは捨てず、resume 後の接続で再送する。
+   */
+  async pause(drainMs = 0): Promise<void> {
+    if (this.paused) return;
+    const t0 = this.o.now();
+    while (this.transport && drainMs > 0 && this.unacked.size > 0 && this.o.now() - t0 < drainMs) await this.o.sleep(50);
+    this.paused = true;
+    this.abortConnect?.();
+    this.connecting?.close();
+    this.endSession?.();
+    this.transport?.close();
+  }
+
+  resume(): void {
+    if (!this.paused) return;
+    this.paused = false;
+    this.wake();
   }
 
   private session(t: Transport): Promise<void> {
