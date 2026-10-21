@@ -123,6 +123,8 @@ export class Tether {
   private suspendSeq = 0;
   private data: DataPath = initialDataPath();
   private peerSuspends = false;
+  /** 子機の wifi-result を受けて、子機の方式(suspend / keep)が分かった。分かるまでは suspend とみなす */
+  private peerReported = false;
   private rejoining = false;
   /** Direct の再接続中の試行(attempt / max)。null = 再接続中ではない */
   private retry: { attempt: number; max: number; reason: string } | null = null;
@@ -571,6 +573,7 @@ export class Tether {
     this.gov.reset();
     this.data = initialDataPath();
     this.peerSuspends = false;
+    this.peerReported = false;
     this.rejoining = false;
     this.retry = null;
     this.resumedBecause = null;
@@ -973,7 +976,7 @@ export class Tether {
       if (this.shareMsg) {
         // suspend 方式: Direct のグループが消えていたら、接続情報を再送 → Nearby を閉じる → グループ再作成の順で作り直す。
         // グループが生きていれば維持して、接続情報を再送するだけ(子機は同じ SSID に入り直す)
-        if (this.nearbyMode === 'suspend' && this.shareMsg.method === 'WifiDirect' && this.data.group === false) void this.rebuildDirect(gen).catch((e) => this.log('Direct 作り直しで例外: ' + (e?.message ?? e)));
+        if (this.nearbyMode === 'suspend' && this.peerIsKeep() === false && this.shareMsg.method === 'WifiDirect' && this.data.group === false) void this.rebuildDirect(gen).catch((e) => this.log('Direct 作り直しで例外: ' + (e?.message ?? e)));
         else {
           if (this.nearbyMode === 'suspend') this.gnote(`Nearby 再接続: Direct グループは${this.data.group === null ? '不明(維持とみなす)' : '生きている(維持)'} → 接続情報の再送のみ`);
           this.sendShare();
@@ -1023,6 +1026,7 @@ export class Tether {
         if (role === 'host') {
           if (this.state.shareMethod) void this.record(this.state.shareMethod, 'join', body.ok);
           this.peerSuspends = body.suspend === true;
+          this.peerReported = true;
           this.data = { ...this.data, reach: { ok: body.ok, at: this.p.now(), rttMs: body.rttMs, error: body.error } };
           this.set({ peerReach: { ok: body.ok, rttMs: body.rttMs, error: body.error } });
           if (body.ok) this.hostPeerReady('wifi-result');
@@ -1208,6 +1212,11 @@ export class Tether {
   //
   // 判断の理由と状態遷移は src/link/directGuard.ts(純関数)。ここは信号を集めて、返ってきた動作(suspend / resume)を実行する。
 
+  /** 子機が keep と報告済み(親機だけ suspend)。子機は heartbeat(エコー)を送らず、親機は Nearby 作り直しもしない */
+  private peerIsKeep(): boolean {
+    return this.peerReported && !this.peerSuspends;
+  }
+
   private hbMs(): number {
     return this.timing.hbIntervalMs;
   }
@@ -1228,6 +1237,7 @@ export class Tether {
     this.gov.reset();
     this.data = initialDataPath();
     this.peerSuspends = false;
+    this.peerReported = false;
     this.log(`Nearby と Direct: ${this.nearbyMode}${this.nearbyMode === 'suspend' ? ' ' + JSON.stringify(this.gov.timing) : ''}`);
     // データ経路の観測は keep でも行う(総合状態 overall に使う)。切れたときの動作だけが suspend 方式
     if (role === 'host') {
@@ -1544,7 +1554,7 @@ export class Tether {
     const nearby: NearbyPhase = this.nearbySuspended ? 'suspended' : s.link === 'connected' ? 'up' : 'down';
     const overall = deriveOverall({
       role: s.role, started: s.started, data: this.data, shareOn: s.share === 'on', wifiJoined: s.wifi === 'joined', vpnOn: s.vpn === 'on',
-      heartbeatMode: this.nearbyMode === 'suspend', retrying: this.retry !== null, now: this.p.now(), echoMs: this.gov.timing.echoMs, directMs: this.gov.timing.directMs,
+      heartbeatMode: this.nearbyMode === 'suspend' && !(s.role === 'host' && this.peerIsKeep()), retrying: this.retry !== null, now: this.p.now(), echoMs: this.gov.timing.echoMs, directMs: this.gov.timing.directMs,
     });
     this.state = { ...s, nearby, overall, data: { ...this.data } };
     this.state.linkState = this.gov.snapshot().state;
