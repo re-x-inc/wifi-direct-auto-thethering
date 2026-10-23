@@ -7,9 +7,10 @@
  * - awaiting-approval: 名前は見えていて、承認の操作がないまま時間切れ
  * - timeout: 時間切れで、スキャンも読めず切り分けられない
  * - unavailable: 失敗したが、スキャンが読めず断られたのか見つからないのか分からない
+ * - unsupported: この端末の Android では参加の操作自体を受け付けられなかった(古い Android・機種固有の制限)
  * - other: 上のどれにも当てはまらない(古い版のメッセージなど)
  */
-export type JoinFailureReason = 'not-found' | 'rejected' | 'awaiting-approval' | 'timeout' | 'unavailable' | 'other';
+export type JoinFailureReason = 'not-found' | 'rejected' | 'awaiting-approval' | 'timeout' | 'unavailable' | 'unsupported' | 'other';
 
 export interface JoinFailure {
   reason: JoinFailureReason;
@@ -23,7 +24,7 @@ export interface JoinFailure {
   freq: number | null;
 }
 
-const REASONS: readonly JoinFailureReason[] = ['not-found', 'rejected', 'awaiting-approval', 'timeout', 'unavailable', 'other'];
+const REASONS: readonly JoinFailureReason[] = ['not-found', 'rejected', 'awaiting-approval', 'timeout', 'unavailable', 'unsupported', 'other'];
 const num = (v: string | undefined): number | null => (v && /^\d+$/.test(v) ? Number(v) : null);
 
 /** 例外メッセージから理由を読む。native の 1 行でなければ、語句から大まかに(timeout だけ)推す */
@@ -48,6 +49,8 @@ export function joinFailureText(reason: JoinFailureReason): string {
       return '接続の確認がまだ終わっていません。表示された確認で「接続」を押してください';
     case 'timeout':
       return '時間内に接続できませんでした。親機に近づいて、もう一度お試しください';
+    case 'unsupported':
+      return 'この端末の Android には対応していません';
     default:
       return '親機の Wi-Fi につなげませんでした。親機に近づいて、もう一度お試しください';
   }

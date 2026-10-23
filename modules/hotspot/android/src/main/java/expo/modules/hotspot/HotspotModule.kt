@@ -12,7 +12,6 @@ import android.net.NetworkRequest
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiNetworkSuggestion
-import android.net.wifi.WifiNetworkSpecifier
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
@@ -68,6 +67,7 @@ class HotspotModule : Module() {
   // joinWifi ごとの待ち時間。保存済みの接続情報での再接続は短く(JS が指定)、省略は JOIN_TIMEOUT_MS(初回の承認待ち)
   @Volatile private var joinTimeoutMs = JOIN_TIMEOUT_MS
   private var joinTimeout: Runnable? = null
+  private var legacyJoiner: LegacyWifiJoiner? = null // API 28 以下の参加経路(使うときだけ作る)
   // 親機: グループが「できた」あと、いつ・なぜ消えたかをログに残すための状態
   private var groupUp = false
   private var groupEndReason: String? = null
@@ -704,23 +704,19 @@ class HotspotModule : Module() {
     joinTimeout?.let { mainHandler.removeCallbacks(it) } // setBand 拒否からの再要求で、前の時間切れを残さない
     joinTimeout = null
     val gen = ++joinGen
-    val sb = WifiNetworkSpecifier.Builder().setSsid(ssid).setWpa2Passphrase(pass)
+    if (JoinPath.pathFor(Build.VERSION.SDK_INT) == JoinPath.Path.LEGACY) { startJoinLegacy(ssid, pass, attempt, gen); return }
     // 親機の GO は 2.4GHz 固定。子機の探索も 2.4GHz に絞り、5GHz/DFS のオフチャンネルスキャンに時間を取られないようにする(API 33+。非対応・失敗時は指定なし)
     // OS が setBand 付きを即拒否する端末では、1 回だけ setBand なしでやり直し、成功した方式をプロセス内で覚える
-    var usedBand = false
+    val wantBand = !bandFallback && JOIN_USE_BAND && Build.VERSION.SDK_INT >= 33 && joinBandPref != false
+    val built = ModernJoin.build(ssid, pass, wantBand) // WifiNetworkSpecifier(API 29+)は ModernJoin の中だけ
+    val usedBand = built.usedBand
     if (bandFallback) DhLog.i(TAG, "joinWifi scan band=指定なし(setBand 拒否→なしで再要求)")
-    else if (JOIN_USE_BAND && Build.VERSION.SDK_INT >= 33 && joinBandPref != false) {
-      try { sb.setBand(android.net.wifi.ScanResult.WIFI_BAND_24_GHZ); usedBand = true; DhLog.i(TAG, "joinWifi scan band=2.4GHz only") }
-      catch (e: Throwable) { DhLog.w(TAG, "joinWifi setBand(2.4GHz) failed $e -> 帯域指定なし") }
-    } else if (!JOIN_USE_BAND) DhLog.i(TAG, "joinWifi scan band=指定なし(JOIN_USE_BAND=false)")
+    else if (usedBand) DhLog.i(TAG, "joinWifi scan band=2.4GHz only")
+    else if (!JOIN_USE_BAND) DhLog.i(TAG, "joinWifi scan band=指定なし(JOIN_USE_BAND=false)")
     else if (Build.VERSION.SDK_INT >= 33) DhLog.i(TAG, "joinWifi scan band=指定なし(この端末は setBand 拒否と覚えている)")
     else DhLog.i(TAG, "joinWifi scan band=指定なし(API<33 は WifiNetworkSpecifier.setBand 不可)")
     val startedAt = SystemClock.elapsedRealtime()
-    val spec = sb.build()
-    val req = NetworkRequest.Builder()
-      .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-      .setNetworkSpecifier(spec)
-      .build()
+    val req = built.request
     joinedSsid = ssid
     val cb = object : ConnectivityManager.NetworkCallback() {
       override fun onAvailable(n: Network) {
@@ -778,6 +774,52 @@ class HotspotModule : Module() {
     mainHandler.postDelayed(joinTimeout!!, joinTimeoutMs)
   }
 
+  /** API 28 以下の参加(旧 API)。成功したら Network をこのプロセスに固定する。SDK_INT < 29 の内側からだけ呼ぶ */
+  private fun startJoinLegacy(ssid: String, pass: String, attempt: Int, gen: Int) {
+    joinedSsid = ssid
+    val startedAt = SystemClock.elapsedRealtime()
+    val joiner = legacyJoiner ?: LegacyWifiJoiner(ctx, cm).also { legacyJoiner = it }
+    val r = joiner.start(ssid, pass, object : LegacyWifiJoiner.Listener {
+      override fun onJoined(n: Network) {
+        if (gen != joinGen) return
+        DhLog.i(TAG, "join available(legacy) attempt=$attempt")
+        joined = n
+        cm.bindProcessToNetwork(n) // ローカル専用ではないので、検証に通らなくても通信がこの Wi-Fi に向くよう必ず固定
+      }
+      override fun onLink(n: Network, lp: LinkProperties) {
+        if (gen != joinGen) return
+        val gw = gatewayOf(lp) ?: return
+        joined = n
+        joinedGw = gw
+        cm.bindProcessToNetwork(n)
+        DhLog.i(TAG, "join ok(legacy) attempt=$attempt")
+        finishJoin("ok", null, gw)
+      }
+      override fun onLost(n: Network) {
+        if (gen == joinGen && joined == n) { joined = null; joinedGw = null; joinedSsid = null; cm.bindProcessToNetwork(null) }
+        sendEvent("onWifiLost", emptyMap<String, Any>())
+      }
+    })
+    if (r != LegacyWifiJoiner.Start.OK) {
+      DhLog.w(TAG, "join legacy start result=$r attempt=$attempt")
+      legacyJoiner?.stop()
+      finishJoin("declined", "join-failed reason=unsupported direct=? total=? expected=? freq=-")
+      return
+    }
+    DhLog.i(TAG, "joinWifi legacy started attempt=$attempt timeout=${joinTimeoutMs}ms")
+    sendEvent("onJoinPrompt", mapOf("ssid" to ssid, "phase" to "show", "timeoutMs" to joinTimeoutMs))
+    joinTimeout = Runnable {
+      if (gen != joinGen) return@Runnable
+      legacyJoiner?.stop()
+      if (joinPending == null) { sendEvent("onJoinPrompt", mapOf("ssid" to ssid, "phase" to "timeout")); return@Runnable }
+      val sc = logScan(ssid, "timeout", false)
+      val reason = when (sc?.expected) { false -> "not-found"; true -> "rejected"; null -> "timeout" }
+      DhLog.w(TAG, "join timeout(legacy) after ${SystemClock.elapsedRealtime() - startedAt}ms reason=$reason")
+      finishJoin("timeout", joinFailure(reason, sc))
+    }
+    mainHandler.postDelayed(joinTimeout!!, joinTimeoutMs)
+  }
+
   private fun finishJoin(phase: String, error: String?, gw: String? = null) {
     if (joinPending == null) return // 終わった参加への二重通知(onLinkPropertiesChanged の繰り返し等)は送らない
     sendEvent("onJoinPrompt", mapOf("ssid" to (joinedSsid ?: ""), "phase" to phase))
@@ -800,6 +842,7 @@ class HotspotModule : Module() {
     cm.bindProcessToNetwork(null)
     netCb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
     netCb = null
+    legacyJoiner?.stop() // 旧経路(API 28 以下)で使っていたら、要求の取り下げ・設定の削除・元の接続の復元
     joined = null; joinedSsid = null; joinedGw = null
   }
 
