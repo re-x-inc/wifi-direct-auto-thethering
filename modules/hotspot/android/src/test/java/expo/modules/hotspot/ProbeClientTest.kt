@@ -116,6 +116,8 @@ class ProbeClientTest {
     FakeSocks(connectRep = 4).use { assertEquals("upstream", one(it).reason) }
     FakeSocks(connectRep = 5).use { assertEquals("connect", one(it).reason) }
     FakeSocks(connectRep = 6).use { assertEquals("timeout", one(it).reason) }
+    assertEquals("upstream", ProbeClient.reasonForReply(4)); assertEquals("upstream", ProbeClient.reasonForReply(1))
+    assertEquals("connect", ProbeClient.reasonForReply(5)); assertEquals("timeout", ProbeClient.reasonForReply(6))
     FakeSocks(closeAfterConnect = true).use { assertEquals("upstream", one(it).reason) }
   }
 

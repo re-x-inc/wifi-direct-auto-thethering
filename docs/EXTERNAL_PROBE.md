@@ -33,7 +33,7 @@
 | 状態機械 | `alive` は direct で aliveAt 更新、retrying / rejoining では direct に戻す(directGuard.ts の表)。`tick` で `now - aliveAt >= echoMs` なら retrying |
 | 子機のネイティブ heartbeat | `Heartbeat.kt`。専用スレッド `dh-heartbeat`、`PARTIAL_WAKE_LOCK`(`tether:heartbeat`)、参加した Wi-Fi の `Network.socketFactory` で親機の 9000 へ TCP。画面オフ時は別間隔。結果は `heartbeatStatus()` と `onHeartbeat` |
 | バス | `BusEngine.kt`(jeromq)。ネイティブのスレッドが `lastRxAt` を更新。JS は `syncBus` で読む。バス接続中は Echo を省く |
-| 親機の中継 | `SocksServer.kt`。ユーザー名/パスワード認証必須の SOCKS5。出口は `cellular ?: activeNetwork`。DNS は親機側で解決(ドメイン名つき CONNECT)。失敗時の応答コードは常に 4(host unreachable)で、DNS 失敗と接続失敗を区別して返さない |
+| 親機の中継 | `SocksServer.kt`。ユーザー名/パスワード認証必須の SOCKS5。出口は `cellular ?: activeNetwork`。DNS は親機側で解決(ドメイン名つき CONNECT)。失敗時の応答コードは DNS 失敗・到達不能=4(host unreachable)、接続拒否=5、タイムアウト=6(古い子機は 4 のままでも動く。ログ上は dns と区別して記録) |
 | 子機の VPN | `TunnelService.kt`。全通信を親機の SOCKS へ流す。**`addDisallowedApplication(packageName)` で自アプリを VPN から外している**。5 秒ごとに親機の SOCKS へ TCP 接続して見る独自の watchdog があり、3 回連続失敗で VPN を落とす(fail-open) |
 | 接続情報 | 子機は `tether.wifi` の `socks {port, user, pass}` を持つ(VPN 起動に使っている) |
 

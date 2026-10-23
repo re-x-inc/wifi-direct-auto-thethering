@@ -68,7 +68,7 @@ object ProbeClient {
         out.write(byteArrayOf(5, 1, 0, 3, h.size.toByte()) + h + byteArrayOf((t.port shr 8).toByte(), t.port.toByte())); out.flush()
         val r = readN(inp, 4)
         val rep = r[1].toInt() and 0xff
-        if (rep != 0) return fail(when (rep) { 5 -> "connect"; 6 -> "timeout"; else -> "upstream" }) // 親機は今は 4 しか返さない(dns と connect の区別は未対応)
+        if (rep != 0) return fail(reasonForReply(rep))
         readN(inp, when (r[3].toInt()) { 1 -> 4 + 2; 4 -> 16 + 2; 3 -> (readN(inp, 1)[0].toInt() and 0xff) + 2; else -> return fail("upstream") })
         // ④ HTTP
         stage = Stage.HTTP
@@ -87,6 +87,9 @@ object ProbeClient {
       fail(when (stage) { Stage.LINK, Stage.AUTH -> "link"; else -> "upstream" }) // 中継に届かない/途中で切れた
     }
   }
+
+  /** 親機の SOCKS5 失敗応答コード → 理由。4(DNS 失敗・到達不能。古い親機は常にこれ)は upstream、5(接続拒否)は connect、6(時間切れ)は timeout */
+  fun reasonForReply(rep: Int): String = when (rep) { 5 -> "connect"; 6 -> "timeout"; else -> "upstream" }
 
   /** 宛先を順に試し、どれか 1 つが 204 なら成功。中継に届かない(link)・認証失敗(auth)は同じ中継なので打ち切る */
   fun probeRound(newSocket: () -> Socket, socksHost: String, socksPort: Int, user: String, pass: String, targets: List<Target>, timeoutMs: Long): Result {
