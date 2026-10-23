@@ -4,7 +4,7 @@ import { joinFailureDetail, joinFailureText, parseJoinFailure, type JoinFailureR
 import { pairedFakes } from './fakePlatform';
 import { Tether } from './tether';
 
-const ALL: JoinFailureReason[] = ['not-found', 'rejected', 'awaiting-approval', 'timeout', 'unavailable', 'other'];
+const ALL: JoinFailureReason[] = ['not-found', 'rejected', 'awaiting-approval', 'timeout', 'unavailable', 'unsupported', 'other'];
 const FORBIDDEN = /暗号化しています|絶対|完璧|だけ|完全/;
 const INTERNAL = /SSID|DIRECT|P2P|Wi-Fi Direct|onUnavailable|ASSOCIATION/i;
 
@@ -30,6 +30,8 @@ test('理由ごとに文言が別で、見つからない・断られた・確�
   assert.match(joinFailureText('rejected'), /親機に接続を断られました。親機のアプリを開き直して/);
   assert.match(joinFailureText('awaiting-approval'), /「接続」を押して/);
   assert.match(joinFailureText('timeout'), /時間内/);
+  assert.equal(joinFailureText('unsupported'), 'この端末の Android には対応していません');
+  assert.equal(parseJoinFailure('join-failed reason=unsupported direct=? total=? expected=? freq=-').reason, 'unsupported');
 });
 
 test('文言と詳細の 1 行に、禁止語と内部用語を含めない', () => {
