@@ -180,9 +180,11 @@ export interface HotspotPort {
 export interface VpnPort {
   /** VPN の許可が済んでいれば true。未許可なら許可ダイアログを出して false */
   prepare(): boolean;
-  start(host: string, port: number, user: string, pass: string): void;
+  /** detachMs/reattachMs: リンク断が続いたら自アプリを VPN から外す/復帰が安定したら戻すまで(ms)。省略は 5000/3000 */
+  start(host: string, port: number, user: string, pass: string, detachMs?: number, reattachMs?: number): void;
   stop(): void;
-  status(): { running: boolean; error: string | null };
+  /** mode: through=自アプリも VPN を通る / legacy-excluded=自アプリ除外(API33未満) / direct=リンク断で VPN を閉じている / off */
+  status(): { running: boolean; error: string | null; mode?: string };
 }
 
 export interface TetherPlatform {

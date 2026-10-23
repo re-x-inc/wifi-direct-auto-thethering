@@ -23,10 +23,13 @@ class VpnTunnelModule : Module() {
       }
     }
 
-    Function("start") { host: String, port: Int, user: String, pass: String ->
+    /** detachMs: リンク断がこの間続いたら自アプリを VPN から外す / reattachMs: 復帰がこの間安定したら VPN に戻す(省略時は 5000 / 3000) */
+    Function("start") { host: String, port: Int, user: String, pass: String, detachMs: Double?, reattachMs: Double? ->
       TunnelService.lastError = null
       ctx.startService(Intent(ctx, TunnelService::class.java)
-        .putExtra("host", host).putExtra("port", port).putExtra("user", user).putExtra("pass", pass))
+        .putExtra("host", host).putExtra("port", port).putExtra("user", user).putExtra("pass", pass)
+        .putExtra("detachMs", detachMs?.toLong() ?: TunnelService.DEFAULT_DETACH_MS)
+        .putExtra("reattachMs", reattachMs?.toLong() ?: TunnelService.DEFAULT_REATTACH_MS))
     }
 
     Function("stop") {
@@ -37,6 +40,7 @@ class VpnTunnelModule : Module() {
       mapOf(
         "running" to runCatching { TProxyService.TProxyIsRunning() }.getOrDefault(false),
         "error" to TunnelService.lastError,
+        "mode" to TunnelService.mode, // through / legacy-excluded / direct / off(種別だけ)
         "stats" to runCatching { TProxyService.TProxyGetStats().toList() }.getOrDefault(emptyList<Long>()),
       )
     }
