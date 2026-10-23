@@ -40,6 +40,10 @@ export interface LinkTimingConfig {
   nearbyRetryMaxMs: number;
   /** 初回の Direct 参加(承認ダイアログを含む)の待ち(ms)= JOIN_TIMEOUT_MS */
   joinTimeoutMs: number;
+  /** 子機: 親機とのリンク断がこの間続いたら、自アプリを VPN から外す(VPN を閉じて直接通信へ)(ms)。既定 5000 */
+  vpnDetachMs: number;
+  /** 子機: リンクの復帰がこの間安定したら、自アプリを VPN に戻す(ms)。既定 3000 */
+  vpnReattachMs: number;
 }
 
 /** 親機→子機へ配る分(閾値の対応関係が崩れないよう、親機が正)。tick・join・Nearby 再試行は端末ごと */
@@ -69,6 +73,8 @@ export const TIMING_RANGES: Record<Scalar, [number, number]> = {
   nearbyRetryBaseMs: [200, 60_000],
   nearbyRetryMaxMs: [1_000, 300_000],
   joinTimeoutMs: [10_000, 600_000],
+  vpnDetachMs: [1_000, 120_000],
+  vpnReattachMs: [1_000, 120_000],
 };
 const BACKOFF_RANGE: [number, number] = [100, 120_000];
 
@@ -91,6 +97,8 @@ export const TIMING_DEFAULTS: LinkTimingConfig = {
   nearbyRetryBaseMs: 1_000,
   nearbyRetryMaxMs: 30_000,
   joinTimeoutMs: 180_000,
+  vpnDetachMs: 5_000,
+  vpnReattachMs: 3_000,
 };
 
 export interface ResolveOptions {

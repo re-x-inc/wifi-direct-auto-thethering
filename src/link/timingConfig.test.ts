@@ -7,6 +7,7 @@ test('既定: T_echo 15s < T_direct 150s < T_nearby 165s、再接続 3 回、Nea
   assert.deepEqual([t.hbIntervalMs, t.echoMs, t.directMs, t.nearbyMs], [5_000, 15_000, 150_000, 165_000]);
   assert.equal(t.retryAttempts, 3);
   assert.deepEqual([t.nearbyRetryBaseMs, t.nearbyRetryMaxMs, t.joinTimeoutMs], [1_000, 30_000, 180_000]);
+  assert.deepEqual([t.vpnDetachMs, t.vpnReattachMs], [5_000, 3_000]);
   assert.deepEqual(t, { ...TIMING_DEFAULTS });
 });
 

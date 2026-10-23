@@ -77,7 +77,7 @@ export function nativePlatform(): TetherPlatform {
     },
     vpn: {
       prepare: () => VpnTunnel.prepare(),
-      start: (h, port, u, p) => VpnTunnel.start(h, port, u, p),
+      start: (h, port, u, p, detachMs, reattachMs) => VpnTunnel.start(h, port, u, p, detachMs, reattachMs),
       stop: () => VpnTunnel.stop(),
       status: () => VpnTunnel.status(),
     },

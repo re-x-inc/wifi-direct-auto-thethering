@@ -1217,7 +1217,7 @@ export class Tether {
         return;
       }
       this.set({ vpn: 'starting' });
-      v.start(gateway, socks.port, socks.user, socks.pass);
+      v.start(gateway, socks.port, socks.user, socks.pass, this.timing.vpnDetachMs, this.timing.vpnReattachMs);
       await this.p.sleep(1500);
       if (gen !== this.gen || this.vpnHold) return;
       const st = v.status();
