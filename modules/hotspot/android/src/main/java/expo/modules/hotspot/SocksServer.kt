@@ -74,8 +74,9 @@ class SocksServer(
     if (cmd == 3) { udpAssociate(client, out); return }
     if (cmd != 1) { reply(out, 7); return }
 
-    val remote = connect(host, dport)
-    if (remote == null) { reply(out, 4); return }
+    val att = connect(host, dport)
+    val remote = att.socket
+    if (remote == null) { reply(out, att.code); return }
     reply(out, 0)
     client.soTimeout = 0
     remote.use { relay(client, remote) }
@@ -84,34 +85,48 @@ class SocksServer(
   /** 回線指定への結びつけが拒否された(別の VPN などが動いている)場合は、以後は既定の経路を使う */
   @Volatile private var noBind = false
 
-  private fun connect(host: String, port: Int): Socket? {
+  /** 接続の結果。失敗のときは [socket] が null で、[code] が子機へ返す SOCKS5 の応答コード(4=到達不能・DNS 失敗、5=接続拒否、6=時間切れ) */
+  private class Attempt(val socket: Socket?, val code: Int = SocksReply.HOST_UNREACHABLE)
+
+  private fun connect(host: String, port: Int): Attempt {
     if (!noBind) {
-      val s = tryConnect(network(), host, port)
-      if (s != null) return s
-      if (lastError?.contains("EPERM") != true) return null
+      val a = tryConnect(network(), host, port)
+      if (a.socket != null) return a
+      if (lastError?.contains("EPERM") != true) return a
       noBind = true
       Log.w("DH-SOCKS", "回線への結びつけが拒否されたため、既定の経路に切り替えます")
     }
     return tryConnect(null, host, port)
   }
 
-  private fun tryConnect(net: Network?, host: String, port: Int): Socket? {
+  /** 失敗の記録。宛先(ホスト名・IP・ポート)とメッセージは残さず、分類と応答コードだけにする(EPERM の判定用の印のみ付ける) */
+  private fun note(stage: String, via: String, f: SocksReply.Failure, e: Throwable) {
+    val eperm = if ((e.message ?: "").contains("EPERM")) " EPERM" else ""
+    lastError = "$stage($via) ${f.kind} rep=${f.code}: ${e.javaClass.simpleName}$eperm"
+    Log.w("DH-SOCKS", lastError!!)
+  }
+
+  private fun tryConnect(net: Network?, host: String, port: Int): Attempt {
     val via = if (net != null) "network=$net" else "default"
     val addrs = try { net?.getAllByName(host) ?: InetAddress.getAllByName(host) } catch (e: Exception) {
-      lastError = "dns($via): ${e.javaClass.simpleName}: ${e.message}"; Log.w("DH-SOCKS", lastError!!); return null
+      val f = SocksReply.classify(e, duringDns = true)
+      note("dns", via, f, e); return Attempt(null, f.code)
     }
     val factory = net?.socketFactory ?: SocketFactory.getDefault()
+    val codes = ArrayList<Int>()
     for (a in addrs) {
       try {
         val s = factory.createSocket()
         s.connect(InetSocketAddress(a, port), 10_000)
         lastError = null
-        return s
+        return Attempt(s)
       } catch (e: Exception) {
-        lastError = "connect($via) ${a.hostAddress}:$port: ${e.javaClass.simpleName}: ${e.message}"; Log.w("DH-SOCKS", lastError!!)
+        val f = SocksReply.classify(e, duringDns = false)
+        codes.add(f.code)
+        note("connect", via, f, e)
       }
     }
-    return null
+    return Attempt(null, SocksReply.worst(codes))
   }
 
   private fun reply(out: OutputStream, code: Int) {

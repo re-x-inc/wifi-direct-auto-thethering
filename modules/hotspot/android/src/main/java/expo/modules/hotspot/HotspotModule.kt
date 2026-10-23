@@ -54,6 +54,8 @@ class HotspotModule : Module() {
   private val externalProbe = ExternalProbe({ joined }) { st -> sendEvent("onExternalProbe", st) }
   private var socks: SocksServer? = null
   private var socksRef: SocksServer? = null
+  // 親機が共有を提供している間(SOCKS 中継の稼働中)だけ CPU と Wi-Fi を起こしておくロック
+  private val shareLocks by lazy { ShareLocks.android(ctx) }
   private var cellular: Network? = null
   private var cellCb: ConnectivityManager.NetworkCallback? = null
   private var p2p: WifiP2pManager? = null
@@ -78,7 +80,7 @@ class HotspotModule : Module() {
     Name("Hotspot")
     Events("onHotspotStopped", "onWifiLost", "onJoinPrompt", "onDirectGroup", "onExternalProbe", "onBusState", "onBusMessage", "log")
     OnCreate { DhLog.sink = { tag, line -> sendEvent("log", mapOf("tag" to tag, "line" to line)) } }
-    OnDestroy { externalProbe.stop("module destroy"); DhLog.sink = null }
+    OnDestroy { externalProbe.stop("module destroy"); runCatching { shareLocks.stop() }; DhLog.sink = null }
 
     // ---- 親機 ----
     AsyncFunction("startHotspot") { promise: Promise ->
@@ -202,6 +204,7 @@ class HotspotModule : Module() {
         android.util.Log.i("DH-SOCKS", "start ok port=$port")
         socks = srv
         socksRef = srv
+        shareLocks.start()
         // 携帯回線の確保を少し待つ
         Thread {
           var i = 0
@@ -209,12 +212,14 @@ class HotspotModule : Module() {
           promise.resolve(mapOf("network" to if (cellular != null) "cellular" else "default"))
         }.start()
       } catch (e: Exception) {
+        shareLocks.stop()
         promise.reject("E_SOCKS", e.message ?: e.toString(), e)
       }
     }
     Function("stopSocks") {
       android.util.Log.i("DH-SOCKS", "stop (was running=${socks != null})")
       socks?.stop(); socks = null
+      shareLocks.stop()
       cellCb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
       cellCb = null; cellular = null
     }
