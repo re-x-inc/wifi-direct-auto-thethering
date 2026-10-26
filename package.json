@@ -25,5 +25,6 @@
     "lint": "expo lint",
     "diag:compare": "tsx scripts/compare-diag.ts"
   },
-  "private": true
+  "private": true,
+  "packageManager": "pnpm@11.28.8"
 }

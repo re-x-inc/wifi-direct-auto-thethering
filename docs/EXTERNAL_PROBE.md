@@ -349,7 +349,7 @@ OK 条件は「バスの生存、または外形監視の成功(noteAliveAt)」�
 | 5 | 親機の受信・延命・表示: 受信、`noteAliveAt(受信時刻)`(ok のみ)、途絶で unknown、「子機のインターネット」項目、見出し | 親機の governor の表は変えない |
 | 6(任意) | 親機の中継の応答コードの返し分け(DNS=4 / 接続拒否=5 / タイムアウト=6)。`dns` と `connect` の区別 | 親機側の変更はこの任意 PR の応答コードだけ |
 
-テスト方針: `internetProbe.ts` は `node --test`(既存の `npm test` の対象)。ネイティブは JVM 単体テスト。governor の遷移表(`directGuard.test.ts`)は変わらないことを確認する。
+テスト方針: `internetProbe.ts` は `node --test`(既存の `pnpm test` の対象)。ネイティブは JVM 単体テスト。governor の遷移表(`directGuard.test.ts`)は変わらないことを確認する。
 
 ### 実機検証の手順(b6 向け。この PR では実施しない)
 

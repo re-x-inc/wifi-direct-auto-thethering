@@ -229,7 +229,7 @@
 | `probe` | 試験・観測の結果: LOHS を作れたか・理由・時刻、STA+P2P / P2P+AP の観測(未実施は `not-probed` / `not-observed`) |
 
 - **取り出し:** `tether.diagnosticReport()`(作る)/ `tether.saveDiagnosticReport()`(作って保存し、`{ report, fileName, json, summary, path }` を返す)。ファイルは `tether-diag-<メーカー>-<機種>-api<SDK>.json`(機種ごとに 1 つ)で、保存先は `Android/data/<パッケージ>/files/diagnostics/`。要約は `summarizeReport()`(人が読める文字列)。
-- **機種比較:** 置き場 `docs/device-reports/`。`npm run diag:compare -- docs/device-reports --diff` で、機種間で値が違う項目だけの Markdown 表を出す。
+- **機種比較:** 置き場 `docs/device-reports/`。`pnpm run diag:compare docs/device-reports --diff` で、機種間で値が違う項目だけの Markdown 表を出す。
 - **診断画面(開発用):** アプリ下部の「診断(開発用)」。ボタンはすべて文字つき(アイコンだけは使わない)。「LocalOnlyHotspot を試す」は実行前に「Wi-Fi が一時的に切れる場合があります」の確認を出す。
 
 ## 10. 実機確認手順(未実施。実機で確認すること)
@@ -239,7 +239,7 @@
 1. 「診断レポートを作って保存」を押す。画面に要約が出て、`tether-diag-<メーカー>-<機種>-api<SDK>.json` が端末内に保存される(保存先は画面に表示)。
 2. 取り出す: (a) 「レポートを共有(JSON)」→ 自分宛て(Drive / メール)に送る、または (b) PC で `adb pull /sdcard/Android/data/<パッケージ名>/files/diagnostics/ ./` (読み取りのみ。端末は変更しない)。
 3. 親機候補では、共有を止めた状態で「LocalOnlyHotspot を試す」を押す(確認で「試す」)。Wi-Fi が一時的に切れてもよいときだけ。押したあと、レポートが自動で作り直され、`probe.lohsCreated` が埋まる。**Wi-Fi が切れたかどうか、何秒で戻ったかを控える。**
-4. 各機種の JSON を `docs/device-reports/` に置き、`npm run diag:compare -- docs/device-reports --diff` で比較する。個人を特定する値が入っていないか、置く前に目で確認する(`redacted` の項目があればその理由も控える)。
+4. 各機種の JSON を `docs/device-reports/` に置き、`pnpm run diag:compare docs/device-reports --diff` で比較する。個人を特定する値が入っていないか、置く前に目で確認する(`redacted` の項目があればその理由も控える)。
 5. 見るところ: `wifi.*`(同時動作の判定、規格、帯域)、`wifiP2p.*`、`features.present`、`power.*`(Doze、バケット、最適化除外)、`vpn.*`、`dpc.*`、`permissions.denied`、`network.networks`(セルラーの有無と能力)、`why` が `sdk<N` / `ex:…` の項目(その機種では取れない)。
 6. 項目ごとの結果を表(§10.4)へ書き戻す。**取れない項目が「不明」のままなのは異常ではない。** 取れた値が実機の振る舞い(例: razr の STA+P2P で AP 不可)と食い違う場合は、API の値より実機を信用し、その食い違いを記録する。
 

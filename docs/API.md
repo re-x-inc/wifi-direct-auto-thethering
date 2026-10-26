@@ -7,7 +7,7 @@
 - 入口: `src/api/index.ts`(`getTether()` で端末ごとに 1 つの `Tether` を得る)
 - 実装: `src/api/tether.ts`。端末の部品(Nearby・Wi-Fi・VPN・保管領域)は `TetherPlatform` で注入し、
   実機は `src/api/native.ts`、テストは `src/api/fakePlatform.ts`(偽物)を使う。
-- テスト: `npm test`(`src/api/tether.test.ts` は 親機・子機の 2 端末を偽物で動かし、接続 → 共有 → VPN → 切断復旧 → 非常口 → ペアリングまで確認)
+- テスト: `pnpm test`(`src/api/tether.test.ts` は 親機・子機の 2 端末を偽物で動かし、接続 → 共有 → VPN → 切断復旧 → 非常口 → ペアリングまで確認)
 - 利用側アプリは `expo.autolinking.searchPaths` でこのリポジトリの `modules/` を取り込む。権限(アクセシビリティは使わない)はこのリポジトリのモジュールが持つものだけ。
 - この API を使うために、tether 自身の `App.tsx` も API 経由に作り替えてある(ペアがあれば起動だけで接続を始める)。
 
@@ -58,7 +58,7 @@ comparisonMarkdown([reportA, reportB], /* onlyDiffs */ true); // 機種比較の
 - 個人を特定できる値(IMEI・電話番号・SSID・MAC・アカウント等)は採取せず、それらしい文字列は `redactItem` が落とす。
 - **ハンドシェイクで送るのは `capabilities()` のみ。** 診断レポート全体は相手へ送らない。外へ出るのは、利用者が診断画面で共有したときと、adb pull したときだけ。
 - `CapabilityPort` の任意メソッド: `diagnostics()`(網羅採取)、`saveFile(name, text)`(アプリ専用領域へ保存し、パスを返す)。
-- 診断画面: `src/DiagnosticsPanel.tsx`(tether の `App.tsx` に組み込み済み。文字つきボタンのみ)。比較: `npm run diag:compare -- <フォルダ> [--diff]`。
+- 診断画面: `src/DiagnosticsPanel.tsx`(tether の `App.tsx` に組み込み済み。文字つきボタンのみ)。比較: `pnpm run diag:compare <フォルダ> [--diff]`。
 
 ## Direct 稼働中の Nearby と総合状態
 
