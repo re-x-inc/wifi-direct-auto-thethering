@@ -1,0 +1,5 @@
+nodeLinker: hoisted
+storeDir: /mnt/workspace/.pnpm-store
+allowBuilds:
+  esbuild: true
+  unrs-resolver: false

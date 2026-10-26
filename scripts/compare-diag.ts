@@ -1,6 +1,6 @@
 /**
  * 機種ごとの診断レポート(JSON)を並べて比較する。
- * 使い方: npx tsx scripts/compare-diag.ts docs/device-reports [--diff]
+ * 使い方: pnpm exec tsx scripts/compare-diag.ts docs/device-reports [--diff]
  *   引数のフォルダ(または JSON ファイル)から tether-diag-*.json を読み、Markdown の比較表を標準出力へ出す。
  *   --diff を付けると、機種間で値が違う項目だけにする。
  */
