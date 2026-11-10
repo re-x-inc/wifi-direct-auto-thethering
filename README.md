@@ -17,3 +17,5 @@ cd android && ANDROID_HOME=/opt/android-sdk ./gradlew :app:assembleDebug
 pnpm exec expo start --port 8081        # 監視モード。adb reverse tcp:8081 tcp:8081 を忘れずに
 pnpm test                          # src/link のテスト
 ```
+
+<!-- CI 検証メモ (2026-11-10): repo-check-k8s の node24／pnpm 確認用の追記。振る舞いへの影響なし。 -->
